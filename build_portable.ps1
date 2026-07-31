@@ -1,7 +1,11 @@
 $ErrorActionPreference = "Stop"
 $sourceRoot = $PSScriptRoot
 $projectRoot = Split-Path -Parent $sourceRoot
-$python = Join-Path $sourceRoot ".venv_build311\Scripts\python.exe"
+$python = if ($env:DNS_AUTO_BUILD_PYTHON) {
+    $env:DNS_AUTO_BUILD_PYTHON
+} else {
+    Join-Path $sourceRoot ".venv_build311\Scripts\python.exe"
+}
 $buildRoot = Join-Path $sourceRoot ".build"
 $stagingRoot = Join-Path $buildRoot "portable-dist"
 $guiDistRoot = Join-Path $buildRoot "gui-dist"
@@ -26,7 +30,12 @@ Copy-Item -LiteralPath (Join-Path $sourceRoot "mcp_policy.json") -Destination $b
 New-Item -ItemType Directory -Force -Path (Join-Path $bundleRoot "inputs"), (Join-Path $bundleRoot "outputs"), (Join-Path $bundleRoot "profiles\sheet"), (Join-Path $bundleRoot "profiles\pdf") | Out-Null
 Copy-Item -LiteralPath (Join-Path $sourceRoot "PORTABLE_README.txt") -Destination (Join-Path $bundleRoot "QUICK_START.txt") -Force
 foreach ($name in @("USER_GUIDE.html", "GUI_GUIDE.html", "GUI_QUICK_START.html", "MCP_GUIDE.html", "CODEX_MCP_CONFIG.example.json", "CODEX_MCP_CONFIG.example.toml")) {
-    Copy-Item -LiteralPath (Join-Path $sourceRoot $name) -Destination $bundleRoot -Force
+    $sourcePath = if ($name.EndsWith(".html")) {
+        Join-Path (Join-Path $sourceRoot "docs") $name
+    } else {
+        Join-Path $sourceRoot $name
+    }
+    Copy-Item -LiteralPath $sourcePath -Destination $bundleRoot -Force
 }
 Copy-Item -LiteralPath (Join-Path $sourceRoot "assets") -Destination $bundleRoot -Recurse -Force
 
