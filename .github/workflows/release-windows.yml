@@ -1,0 +1,59 @@
+name: Build and publish Windows portable release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and update
+        required: true
+        default: v1.0.0
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Create build environment
+        shell: pwsh
+        run: |
+          python -m venv .venv_build311
+          .\.venv_build311\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv_build311\Scripts\python.exe -m pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Build GUI and MCP portable bundle
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_portable.ps1
+
+      - name: Name package and generate checksum
+        shell: pwsh
+        run: |
+          $source = Join-Path (Split-Path $PWD -Parent) "release\DnS_Auto_Portable.zip"
+          $package = Join-Path $PWD "DnS_Auto_Portable_${{ inputs.tag }}.zip"
+          Copy-Item -LiteralPath $source -Destination $package
+          $hash = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash
+          "$hash  $(Split-Path $package -Leaf)" |
+            Set-Content -LiteralPath (Join-Path $PWD "RELEASE_CHECKSUMS.txt") -Encoding ascii
+
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: |
+            DnS_Auto_Portable_${{ inputs.tag }}.zip
+            RELEASE_CHECKSUMS.txt
+          fail_on_unmatched_files: true
+          overwrite_files: true
