@@ -1,0 +1,4 @@
+# 압축을 푼 DnS Auto 폴더의 MCP EXE 절대경로로 바꾸세요.
+[mcp_servers.dns-auto]
+command = 'D:\Apps\DnS Auto\DnS Auto MCP.exe'
+args = []

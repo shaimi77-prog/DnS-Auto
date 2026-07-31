@@ -1,0 +1,40 @@
+﻿name: 버그 신고
+description: 개인정보를 제거한 재현 가능한 오류를 신고합니다.
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "실제 업무문서, 개인정보, 감사 로그와 사용자 프로필을 첨부하지 마십시오."
+  - type: input
+    id: version
+    attributes:
+      label: DnS Auto 버전
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: path
+    attributes:
+      label: 실행 경로
+      options: [GUI, MCP]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 재현 절차
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 예상 결과
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 실제 결과
+    validations:
+      required: true

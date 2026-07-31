@@ -1,0 +1,21 @@
+﻿name: 기능 제안
+description: 사용 사례와 기대 효과를 중심으로 개선을 제안합니다.
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 해결하려는 문제
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 제안 내용
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: 데이터 정확성·호환성 영향

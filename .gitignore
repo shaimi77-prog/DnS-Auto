@@ -1,0 +1,46 @@
+﻿# Python
+.venv/
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+
+# Build and release output
+build/
+.build/
+dist/
+release/
+*.egg-info/
+*.zip
+
+# Runtime and user data
+inputs/
+outputs/
+jobs/
+profiles/
+DnS_Auto_AuditLog_*.txt
+*_리포트.txt
+~$*
+*.tmp
+_MEI*/
+
+# Test artifacts and private fixtures
+test_artifacts/
+test_files/
+통합_포터블_이동테스트_*/
+대화형_이동테스트_*/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+mcp_policy.local.json
+CODEX_MCP_CONFIG.json
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+private_test_files/
