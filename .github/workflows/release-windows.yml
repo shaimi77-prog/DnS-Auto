@@ -36,7 +36,7 @@ jobs:
       - name: Build GUI and MCP portable bundle
         shell: pwsh
         run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_portable.ps1
+          & .\build_portable.ps1
 
       - name: Name package and generate checksum
         shell: pwsh
