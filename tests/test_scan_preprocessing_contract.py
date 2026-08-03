@@ -5,7 +5,6 @@ import unittest
 
 
 SOURCE = Path(__file__).resolve().parents[1]
-PROJECT = SOURCE.parent
 
 
 class ScanPreprocessingContractTests(unittest.TestCase):
@@ -44,7 +43,7 @@ class ScanPreprocessingContractTests(unittest.TestCase):
 
     def test_opencv_is_direct_and_notice_is_not_duplicated(self):
         requirements = (SOURCE / "requirements.txt").read_text(encoding="utf-8")
-        notices = (PROJECT / "github_release_v1.0.0" / "THIRD_PARTY_NOTICES.md").read_text(
+        notices = (SOURCE / "THIRD_PARTY_NOTICES.md").read_text(
             encoding="utf-8"
         )
         self.assertIn("opencv-python>=5.0,<6", requirements)
