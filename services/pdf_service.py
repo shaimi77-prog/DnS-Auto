@@ -62,7 +62,15 @@ def merge_pdfs(
     data_book = load_workbook(template, data_only=True, keep_vba=keep_vba)
     write_book = load_workbook(template, keep_vba=keep_vba)
     failed_files: list[str] = []
-    summary = {"processed_pages": 0, "empty_pages": [], "rotated_pages": [], "ocr_unavailable_pages": []}
+    summary = {
+        "processed_pages": 0,
+        "empty_pages": [],
+        "rotated_pages": [],
+        "ocr_unavailable_pages": [],
+        "deskew_pages": [],
+        "orientation_pages": [],
+        "preprocess_rejected_pages": [],
+    }
     total_pages = 0
     try:
         for paths in pdfs_by_sheet.values():

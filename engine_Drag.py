@@ -13,10 +13,18 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import fitz  # PyMuPDF
+import numpy as np
 from openpyxl import load_workbook
 from PIL import Image, ImageTk
 
 from config import PROGRAM_NAME, VERSION
+from page_preprocessing import (
+    DocumentOrientationClassifier,
+    PagePreprocessConfig,
+    PagePreprocessor,
+    inverse_transform_box,
+)
+from reference_navigation import ReferenceNavigationState
 from utils_profiles import (
     PDF_PROFILE_TYPE,
     PROFILE_SCHEMA_VERSION,
@@ -92,6 +100,15 @@ class HybridTextExtractor:
         self.last_keyword_status = None
         self.last_keyword_reason = None
         self.last_ocr_initialization_seconds = 0.0
+        self.page_preprocessor = PagePreprocessor(
+            PagePreprocessConfig(
+                enabled=True,
+                orientation_enabled=True,
+                deskew_enabled=True,
+            ),
+            orientation_classifier=DocumentOrientationClassifier(),
+        )
+        self.last_preprocess_result = None
 
     def reset_work_cache(self):
         """새 취합 작업을 시작할 때 메모리 OCR 캐시와 상태를 초기화합니다."""
@@ -99,6 +116,7 @@ class HybridTextExtractor:
         self.last_keyword_status = None
         self.last_keyword_reason = None
         self.last_ocr_initialization_seconds = 0.0
+        self.last_preprocess_result = None
         self._ocr_unavailable_logged = False
         self._ocr_disabled_for_work = False
         if self.ocr is not None:
@@ -269,9 +287,46 @@ class HybridTextExtractor:
         except Exception as error:
             self._set_ocr_unavailable("PAGE_RENDER_FAILED", str(error))
             return None
+        transform_matrix = np.eye(3, dtype=np.float64)
+        source_width = pix.width
+        source_height = pix.height
+        ocr_input = pix.tobytes("png")
+        preprocess_result = None
+        if fitz.Rect(clip) == page.rect:
+            rgb = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                pix.height, pix.width, pix.n
+            )[:, :, :3]
+            preprocess_result = self.page_preprocessor.preprocess(
+                rgb[:, :, ::-1], pdf_rotation=page.rotation
+            )
+            self.last_preprocess_result = preprocess_result
+            transform_matrix = preprocess_result.transform_matrix
+            if preprocess_result.status == "corrected":
+                ocr_input = preprocess_result.processed_image
+            if preprocess_result.orientation_applied:
+                logging.info(
+                    "PAGE_ORIENTATION_APPLIED: 파일=%s, 페이지=%s, "
+                    "감지=%s도, 보정=%s도, 신뢰도=%.4f, 차이=%.4f",
+                    os.path.basename(self._page_identity(page)),
+                    page.number + 1,
+                    preprocess_result.detected_orientation,
+                    preprocess_result.orientation_correction,
+                    preprocess_result.orientation_confidence,
+                    preprocess_result.orientation_margin,
+                )
+            if preprocess_result.deskew_applied:
+                logging.info(
+                    "PAGE_DESKEW_APPLIED: 파일=%s, 페이지=%s, 각도=%.3f, "
+                    "선분=%s, 분산=%.3f",
+                    os.path.basename(self._page_identity(page)),
+                    page.number + 1,
+                    preprocess_result.skew_angle,
+                    preprocess_result.valid_line_count,
+                    preprocess_result.angle_dispersion,
+                )
         try:
             result = self.ocr(
-                pix.tobytes("png"),
+                ocr_input,
                 use_det=True,
                 use_cls=False,
                 use_rec=True,
@@ -284,8 +339,21 @@ class HybridTextExtractor:
         texts = tuple(getattr(result, "txts", None) or ())
         scores = tuple(getattr(result, "scores", None) or ())
         compact = {
-            "width": pix.width,
-            "height": pix.height,
+            "width": (
+                preprocess_result.processed_image.shape[1]
+                if preprocess_result is not None else pix.width
+            ),
+            "height": (
+                preprocess_result.processed_image.shape[0]
+                if preprocess_result is not None else pix.height
+            ),
+            "source_width": source_width,
+            "source_height": source_height,
+            "transform_matrix": transform_matrix,
+            "preprocess_status": (
+                preprocess_result.status
+                if preprocess_result is not None else "not_requested"
+            ),
             "clip": tuple(clip),
             "boxes": tuple(boxes) if boxes is not None else (),
             "texts": texts,
@@ -299,17 +367,28 @@ class HybridTextExtractor:
         return self._ocr_detect(page, page.rect, OCR_KEYWORD_SEARCH_DPI)
 
     @staticmethod
-    def _ocr_box_to_pdf_rect(box, clip, image_width, image_height):
-        points = list(box)
+    def _ocr_box_to_pdf_rect(
+        box,
+        clip,
+        image_width,
+        image_height,
+        transform_matrix=None,
+        source_width=None,
+        source_height=None,
+    ):
+        points = np.asarray(list(box), dtype=np.float64)
+        if transform_matrix is not None:
+            points = inverse_transform_box(points, transform_matrix)
         xs = [float(point[0]) for point in points]
         ys = [float(point[1]) for point in points]
+        coordinate_width = source_width or image_width
+        coordinate_height = source_height or image_height
         return fitz.Rect(
-            clip.x0 + min(xs) * clip.width / image_width,
-            clip.y0 + min(ys) * clip.height / image_height,
-            clip.x0 + max(xs) * clip.width / image_width,
-            clip.y0 + max(ys) * clip.height / image_height,
+            clip.x0 + min(xs) * clip.width / coordinate_width,
+            clip.y0 + min(ys) * clip.height / coordinate_height,
+            clip.x0 + max(xs) * clip.width / coordinate_width,
+            clip.y0 + max(ys) * clip.height / coordinate_height,
         )
-
     def _find_native_keyword_candidates(self, page, origin_rect, keyword):
         if not keyword:
             return []
@@ -333,7 +412,7 @@ class HybridTextExtractor:
         return list(candidates.values())
 
     def _find_ocr_keyword_candidates(self, page, origin_rect, keyword):
-        if not keyword or int(page.rotation) % 360:
+        if not keyword:
             return []
         normalized_keyword = self._normalized_keyword(keyword)
         width = max(origin_rect.width, 5)
@@ -373,6 +452,9 @@ class HybridTextExtractor:
                 clip,
                 detected["width"],
                 detected["height"],
+                transform_matrix=detected.get("transform_matrix"),
+                source_width=detected.get("source_width"),
+                source_height=detected.get("source_height"),
             )
             if not clips[-1].intersects(rect):
                 continue
@@ -491,12 +573,25 @@ class HybridTextExtractor:
         drag_rect = mapping["rect"]
         keyword = mapping.get("keyword")
         template_anchor = mapping.get("anchor_rect")
+        preprocess_result = self.last_preprocess_result
         if not keyword or template_anchor is None:
+            if preprocess_result is not None and preprocess_result.orientation_applied:
+                preprocess_result.status = "rejected"
+                preprocess_result.reference_validation = "rejected"
+                preprocess_result.failure_reason = "anchor_required_for_rotation"
+                logging.warning("PAGE_REFERENCE_VALIDATION_REJECTED: reason=anchor_required_for_rotation")
+                return fitz.Rect()
             return drag_rect
         tracking_anchor = mapping.get("tracking_anchor_rect") or template_anchor
         search_origin = self._tracking_search_origin(page, drag_rect, tracking_anchor)
         candidates = self.find_keyword_candidates(page, search_origin, keyword)
         if not candidates:
+            if preprocess_result is not None and preprocess_result.orientation_applied:
+                preprocess_result.status = "rejected"
+                preprocess_result.reference_validation = "rejected"
+                preprocess_result.failure_reason = "anchor_mismatch"
+                logging.warning("PAGE_REFERENCE_VALIDATION_REJECTED: reason=anchor_mismatch")
+                return fitz.Rect()
             if self.last_keyword_status == OCR_NO_MATCH:
                 logging.warning(
                     "%s: 파일=%s, 페이지=%s, 키워드=%s, 절대좌표 사용",
@@ -521,6 +616,47 @@ class HybridTextExtractor:
             key=lambda candidate: self._distance(tracking_anchor, candidate),
         )
         mapping["tracking_anchor_rect"] = fitz.Rect(current_anchor)
+        if preprocess_result is not None and preprocess_result.orientation_applied:
+            preprocess_result.reference_validation = "accepted"
+            logging.info(
+                "PAGE_REFERENCE_VALIDATION_ACCEPTED: 파일=%s, 페이지=%s, 키워드=%s",
+                os.path.basename(getattr(page.parent, "name", "") or "(메모리 PDF)"),
+                page.number + 1,
+                keyword,
+            )
+            template_center = fitz.Point(
+                (template_anchor.x0 + template_anchor.x1) / 2,
+                (template_anchor.y0 + template_anchor.y1) / 2,
+            )
+            drag_center = fitz.Point(
+                (drag_rect.x0 + drag_rect.x1) / 2,
+                (drag_rect.y0 + drag_rect.y1) / 2,
+            )
+            dx = drag_center.x - template_center.x
+            dy = drag_center.y - template_center.y
+            angle = preprocess_result.detected_orientation % 360
+            rotated_dx, rotated_dy = {
+                90: (-dy, dx),
+                180: (-dx, -dy),
+                270: (dy, -dx),
+            }.get(angle, (dx, dy))
+            anchor_center = fitz.Point(
+                (current_anchor.x0 + current_anchor.x1) / 2,
+                (current_anchor.y0 + current_anchor.y1) / 2,
+            )
+            width, height = drag_rect.width, drag_rect.height
+            if angle in (90, 270):
+                width, height = height, width
+            center = fitz.Point(
+                anchor_center.x + rotated_dx,
+                anchor_center.y + rotated_dy,
+            )
+            return fitz.Rect(
+                center.x - width / 2,
+                center.y - height / 2,
+                center.x + width / 2,
+                center.y + height / 2,
+            ) & page.rect
         return fitz.Rect(
             current_anchor.x0 + mapping["offset_x"],
             current_anchor.y0 + mapping["offset_y"],
@@ -593,6 +729,9 @@ class HybridTextExtractor:
                 source_clip,
                 detected["width"],
                 detected["height"],
+                transform_matrix=detected.get("transform_matrix"),
+                source_width=detected.get("source_width"),
+                source_height=detected.get("source_height"),
             )
             if target_rect is not None:
                 center = fitz.Point(
@@ -686,6 +825,8 @@ class HybridTextExtractor:
         force_ocr=False,
         dpi=OCR_VALUE_RECOGNITION_DPI,
     ):
+        if force_ocr:
+            self._ocr_page_detect(page)
         rect = self.adjusted_rect(page, mapping)
         if rect.width < 5 or rect.height < 5:
             logging.warning("추출 영역이 5pt 미만이므로 판독을 생략합니다.")
@@ -820,7 +961,7 @@ def _native_page_metrics(page):
 
 
 def select_reference_page(pdf_paths):
-    """그룹·개별 공통으로 비회전 문서형 페이지를 우선 선정합니다."""
+    """앞 3페이지에서 네이티브 문서를 우선 추천하고 회전·스캔은 폴백합니다."""
     scanned_fallback = None
     rotated_pages = []
     unreadable_files = []
@@ -832,15 +973,6 @@ def select_reference_page(pdf_paths):
                 ):
                     page = document[page_index]
                     rotation = int(page.rotation) % 360
-                    if rotation:
-                        rotated_pages.append(
-                            {
-                                "pdf_path": pdf_path,
-                                "page_index": page_index,
-                                "rotation": rotation,
-                            }
-                        )
-                        continue
                     valid_characters, block_count = _native_page_metrics(page)
                     candidate = {
                         "pdf_path": pdf_path,
@@ -848,7 +980,8 @@ def select_reference_page(pdf_paths):
                         "source_type": (
                             "native"
                             if (
-                                valid_characters >= MIN_NATIVE_TEXT_CHARS
+                                not rotation
+                                and valid_characters >= MIN_NATIVE_TEXT_CHARS
                                 and block_count >= MIN_NATIVE_TEXT_BLOCKS
                             )
                             else "scanned"
@@ -901,6 +1034,165 @@ def select_reference_page(pdf_paths):
         )
     )
 
+class ReferenceReselectionRequested(RuntimeError):
+    """사용자가 OCR 기준 페이지 대신 다른 페이지 탐색을 선택했습니다."""
+
+
+class ReferencePageSelector:
+    """자동 추천값에서 시작해 모든 선택 PDF 페이지를 수동 탐색합니다."""
+
+    def __init__(self, pdf_paths, suggestion, parent_root=None):
+        page_counts = []
+        valid_paths = []
+        for path in pdf_paths:
+            with fitz.open(path) as document:
+                if document.page_count:
+                    valid_paths.append(path)
+                    page_counts.append(document.page_count)
+        if not valid_paths:
+            raise ValueError("기준 페이지로 탐색할 PDF가 없습니다.")
+        self.state = ReferenceNavigationState.from_suggestion(
+            valid_paths, page_counts, suggestion
+        )
+        self.result = None
+        self.document = None
+        self.root = tk.Toplevel(parent_root)
+        self.root.title("기준 파일·기준 페이지 선택")
+        self.root.transient(parent_root)
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
+        self.root.geometry("960x780")
+        self.root.minsize(720, 560)
+
+        info = tk.Frame(self.root, bg="#E3F2FD", padx=12, pady=10)
+        info.pack(fill=tk.X)
+        self.page_label = tk.Label(
+            info, bg="#E3F2FD", fg="#0D47A1", font=("맑은 고딕", 11, "bold")
+        )
+        self.page_label.pack(anchor="w")
+        self.type_label = tk.Label(
+            info, bg="#E3F2FD", fg="#37474F", font=("맑은 고딕", 10)
+        )
+        self.type_label.pack(anchor="w", pady=(4, 0))
+
+        self.canvas = tk.Canvas(self.root, bg="#777777")
+        self.canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        controls = tk.Frame(self.root, padx=10, pady=8)
+        controls.pack(fill=tk.X)
+        self.previous_file_button = tk.Button(
+            controls, text="이전 파일", command=lambda: self._move("previous_file")
+        )
+        self.previous_page_button = tk.Button(
+            controls, text="이전 페이지", command=lambda: self._move("previous_page")
+        )
+        self.next_page_button = tk.Button(
+            controls, text="다음 페이지", command=lambda: self._move("next_page")
+        )
+        self.next_file_button = tk.Button(
+            controls, text="다음 파일", command=lambda: self._move("next_file")
+        )
+        for button in (
+            self.previous_file_button,
+            self.previous_page_button,
+            self.next_page_button,
+            self.next_file_button,
+        ):
+            button.pack(side=tk.LEFT, padx=3)
+        tk.Button(
+            controls,
+            text="이 페이지를 기준으로 선택",
+            command=self._confirm,
+            bg="#2E7D32",
+            fg="white",
+            padx=12,
+        ).pack(side=tk.RIGHT, padx=3)
+        tk.Button(controls, text="취소", command=self._close).pack(side=tk.RIGHT, padx=3)
+
+        self._render()
+        self.root.grab_set()
+        try:
+            self.root.wait_window()
+        finally:
+            if self.document is not None:
+                self.document.close()
+                self.document = None
+
+    def _candidate(self):
+        page = self.document[self.state.page_index]
+        valid_characters, block_count = _native_page_metrics(page)
+        source_type = (
+            "native"
+            if valid_characters >= MIN_NATIVE_TEXT_CHARS
+            and block_count >= MIN_NATIVE_TEXT_BLOCKS
+            else "scanned"
+        )
+        return {
+            "pdf_path": self.state.current_path,
+            "page_index": self.state.page_index,
+            "source_type": source_type,
+            "text_length": valid_characters,
+            "block_count": block_count,
+            "page_width": page.rect.width,
+            "page_height": page.rect.height,
+            "rotation": int(page.rotation) % 360,
+        }
+
+    def _render(self):
+        if self.document is not None:
+            self.document.close()
+        self.document = fitz.open(self.state.current_path)
+        page = self.document[self.state.page_index]
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.15, 1.15), alpha=False)
+        image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        max_width = max(self.canvas.winfo_width() - 20, 680)
+        max_height = max(self.canvas.winfo_height() - 20, 440)
+        image.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+        self.preview_image = ImageTk.PhotoImage(image)
+        self.canvas.delete("all")
+        self.canvas.create_image(
+            max_width / 2, 10, anchor=tk.N, image=self.preview_image
+        )
+        candidate = self._candidate()
+        self.page_label.configure(
+            text=(
+                f"기준 페이지: {os.path.basename(self.state.current_path)} / "
+                f"{self.state.page_index + 1}페이지"
+            )
+        )
+        self.type_label.configure(
+            text=(
+                "판독 유형: [PDF 텍스트]"
+                if candidate["source_type"] == "native"
+                else "판독 유형: [OCR 필요]"
+            )
+        )
+        self.previous_file_button.configure(
+            state=tk.NORMAL if self.state.can_previous_file else tk.DISABLED
+        )
+        self.previous_page_button.configure(
+            state=tk.NORMAL if self.state.can_previous_page else tk.DISABLED
+        )
+        self.next_page_button.configure(
+            state=tk.NORMAL if self.state.can_next_page else tk.DISABLED
+        )
+        self.next_file_button.configure(
+            state=tk.NORMAL if self.state.can_next_file else tk.DISABLED
+        )
+
+    def _move(self, method_name):
+        getattr(self.state, method_name)()
+        self._render()
+
+    def _confirm(self):
+        self.result = self._candidate()
+        self._close()
+
+    def _close(self):
+        try:
+            self.root.grab_release()
+        except tk.TclError:
+            pass
+        if self.root.winfo_exists():
+            self.root.destroy()
 
 class VisualSelector:
     """
@@ -914,9 +1206,15 @@ class VisualSelector:
         parent_root=None,
         page_index=0,
         source_type="native",
+        ocr_confirmation_state=None,
     ):
         self.root = tk.Toplevel(parent_root)
         self.header_name = header_name
+        self.source_type = source_type
+        self.ocr_confirmation_state = (
+            ocr_confirmation_state if ocr_confirmation_state is not None else {}
+        )
+        self.request_reselection = False
         self.root.title(f"영역 설정 마법사: [{header_name}]")
         self.root.attributes("-topmost", True)
 
@@ -990,6 +1288,9 @@ class VisualSelector:
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)
         self.root.wait_window()
+        self.doc.close()
+        if self.request_reselection:
+            raise ReferenceReselectionRequested()
 
     def on_press(self, event):
         self.start_x = self.canvas.canvasx(event.x)
@@ -1275,6 +1576,23 @@ class VisualSelector:
                 fg="#C62828",
             )
             return
+        if (
+            self.source_type == "scanned"
+            and not self.ocr_confirmation_state.get("confirmed")
+        ):
+            proceed = messagebox.askyesno(
+                "OCR 기준 페이지 안내",
+                "이 기준 페이지는 이미지 기반(OCR)입니다.\n"
+                "문자 인식 특성상 텍스트 기반 문서보다 위치·키워드 인식 정확도가\n"
+                "달라질 수 있습니다.\n\n계속 진행하시겠습니까?\n"
+                "[아니오]를 누르면 다른 페이지 선택으로 돌아갑니다.",
+                parent=self.root,
+            )
+            if not proceed:
+                self.request_reselection = True
+                self.root.destroy()
+                return
+            self.ocr_confirmation_state["confirmed"] = True
         self.anchor_keyword = keyword
         logging.info(
             "좌표 및 기준 단어 확정 -> 항목: %s, Rect: %s, Keyword: %s, "
@@ -2010,6 +2328,7 @@ def _load_profile_mapping(mapping_set, headers, reference, parent_root):
 
 def _create_visual_mapping(reference, headers, parent_root):
     mapping = {}
+    ocr_confirmation_state = {}
     pdf_path = reference["pdf_path"]
     page_index = reference["page_index"]
     with fitz.open(pdf_path) as document:
@@ -2025,6 +2344,7 @@ def _create_visual_mapping(reference, headers, parent_root):
                 parent_root=parent_root,
                 page_index=page_index,
                 source_type=reference["source_type"],
+                ocr_confirmation_state=ocr_confirmation_state,
             )
             if selector.final_rect:
                 mapping[header] = TEXT_EXTRACTOR.create_mapping(
@@ -2206,6 +2526,9 @@ def _collect_pdf_rows(
     summary.setdefault("empty_pages", [])
     summary.setdefault("rotated_pages", [])
     summary.setdefault("ocr_unavailable_pages", [])
+    summary.setdefault("deskew_pages", [])
+    summary.setdefault("orientation_pages", [])
+    summary.setdefault("preprocess_rejected_pages", [])
     for pdf_path in pdf_paths:
         filename = os.path.basename(pdf_path)
         try:
@@ -2214,6 +2537,7 @@ def _collect_pdf_rows(
                     TEXT_EXTRACTOR.reset_mapping_tracking(item_mapping)
                 pdf_has_text = False
                 for page_index, page in enumerate(document):
+                    TEXT_EXTRACTOR.last_preprocess_result = None
                     if cancellation is not None and cancellation.should_cancel():
                         break
                     if progress is not None and overall_state is not None:
@@ -2224,13 +2548,11 @@ def _collect_pdf_rows(
                         except Exception:
                             has_native_text = False
                         work_type = (
-                            "skipped" if int(page.rotation) % 360 else
-                            "ocr" if force_ocr or not has_native_text else
+                            "ocr" if force_ocr or int(page.rotation) % 360 or not has_native_text else
                             "native_text"
                         )
                         activity = (
                             "PDF 텍스트 추출 중" if work_type == "native_text" else
-                            "회전 페이지 제외 중" if work_type == "skipped" else
                             "OCR로 텍스트 추출 중"
                         )
                         overall_state["current"] += 1
@@ -2245,26 +2567,6 @@ def _collect_pdf_rows(
                             ocr_weight=1 + len(mapping),
                             sheet_name=sheet_name,
                         )
-                    rotation = int(page.rotation) % 360
-                    if rotation:
-                        excluded = {
-                            "file": filename,
-                            "page": page_index + 1,
-                            "rotation": rotation,
-                            "reason": ROTATED_PAGE_EXCLUDED,
-                        }
-                        summary["rotated_pages"].append(excluded)
-                        logging.warning(
-                            "%s: 파일=%s, 페이지=%s, 회전=%s도, "
-                            "키워드 추적과 값 추출을 수행하지 않습니다.",
-                            ROTATED_PAGE_EXCLUDED,
-                            filename,
-                            page_index + 1,
-                            rotation,
-                        )
-                        if progress is not None and overall_state is not None:
-                            progress.complete_unit(overall_state["current"], work_type="skipped")
-                        continue
                     values = {}
                     page_has_text = False
                     for header in headers:
@@ -2272,7 +2574,9 @@ def _collect_pdf_rows(
                             continue
                         text = (
                             TEXT_EXTRACTOR.extract_text(
-                                page, mapping[header], force_ocr=force_ocr
+                                page,
+                                mapping[header],
+                                force_ocr=force_ocr or bool(int(page.rotation) % 360),
                             )
                             if header in mapping else ""
                         )
@@ -2280,6 +2584,38 @@ def _collect_pdf_rows(
                         if text:
                             page_has_text = True
                             pdf_has_text = True
+                    preprocess_result = TEXT_EXTRACTOR.last_preprocess_result
+                    if preprocess_result is not None:
+                        if preprocess_result.orientation_applied:
+                            summary["orientation_pages"].append(
+                                {
+                                    "file": filename,
+                                    "page": page_index + 1,
+                                    "detected": preprocess_result.detected_orientation,
+                                    "correction": preprocess_result.orientation_correction,
+                                    "confidence": round(preprocess_result.orientation_confidence, 4),
+                                    "margin": round(preprocess_result.orientation_margin, 4),
+                                }
+                            )
+                        if preprocess_result.deskew_applied:
+                            summary["deskew_pages"].append(
+                                {
+                                    "file": filename,
+                                    "page": page_index + 1,
+                                    "angle": round(preprocess_result.skew_angle, 4),
+                                    "confidence": round(preprocess_result.skew_confidence, 4),
+                                    "line_count": preprocess_result.valid_line_count,
+                                    "angle_dispersion": round(preprocess_result.angle_dispersion, 4),
+                                }
+                            )
+                        if preprocess_result.status == "rejected":
+                            summary["preprocess_rejected_pages"].append(
+                                {
+                                    "file": filename,
+                                    "page": page_index + 1,
+                                    "reason": preprocess_result.failure_reason,
+                                }
+                            )
                     if page_has_text:
                         rows.append(values)
                         summary["processed_pages"] += 1
@@ -2319,7 +2655,9 @@ def _processing_summary_text(summary, failed_files):
     lines = [
         f"정상 처리: {summary.get('processed_pages', 0)}페이지",
         f"빈 결과: {len(summary.get('empty_pages', []))}페이지",
-        f"회전 제외: {len(summary.get('rotated_pages', []))}페이지",
+        f"회전 보정: {len(summary.get('orientation_pages', []))}페이지",
+        f"기울기 보정: {len(summary.get('deskew_pages', []))}페이지",
+        f"전처리 폐기: {len(summary.get('preprocess_rejected_pages', []))}페이지",
         (
             "OCR 사용 불가로 미처리: "
             f"{len(summary.get('ocr_unavailable_pages', []))}페이지"
@@ -2327,6 +2665,21 @@ def _processing_summary_text(summary, failed_files):
     ]
     if failed_files:
         lines.append(f"제외 파일: {len(failed_files)}개")
+    orientation_pages = summary.get("orientation_pages", [])
+    if orientation_pages:
+        lines.extend(("", "회전 보정 내역:"))
+        for item in orientation_pages[:10]:
+            lines.append(
+                f"- {item['file']} / {item['page']}페이지 / "
+                f"{item['detected']}도 감지 → {item['correction']}도 보정"
+            )
+    deskew_pages = summary.get("deskew_pages", [])
+    if deskew_pages:
+        lines.extend(("", "기울기 보정 내역:"))
+        for item in deskew_pages[:10]:
+            lines.append(
+                f"- {item['file']} / {item['page']}페이지 / {item['angle']:+.2f}도"
+            )
     rotated_pages = summary.get("rotated_pages", [])
     if rotated_pages:
         lines.append("")
@@ -2400,13 +2753,12 @@ def run_application(parent_root, force_ocr=False):
                     return
                 pdfs_by_sheet[sheet_name] = list(selected_pdfs)
 
-            reference = select_reference_page(
-                [
-                    pdf_path
-                    for sheet_name in spec["sheets"]
-                    for pdf_path in pdfs_by_sheet[sheet_name]
-                ]
-            )
+            all_pdf_paths = [
+                pdf_path
+                for sheet_name in spec["sheets"]
+                for pdf_path in pdfs_by_sheet[sheet_name]
+            ]
+            reference = select_reference_page(all_pdf_paths)
             loaded_set = _find_loaded_mapping_set(selector.loaded_profile, spec)
             if loaded_set is not None:
                 try:
@@ -2424,11 +2776,24 @@ def run_application(parent_root, force_ocr=False):
                         f"현재 설정({spec['group']}: {', '.join(spec['sheets'])})과 "
                         "일치하는 매핑이 프로파일에 없습니다."
                     )
-                mapping = _create_visual_mapping(
-                    reference,
-                    headers,
-                    parent_root,
-                )
+                while True:
+                    reference_selector = ReferencePageSelector(
+                        all_pdf_paths, reference, parent_root=parent_root
+                    )
+                    if reference_selector.result is None:
+                        logging.info("사용자가 기준 파일·페이지 선택을 취소했습니다.")
+                        return
+                    reference = reference_selector.result
+                    try:
+                        mapping = _create_visual_mapping(
+                            reference, headers, parent_root
+                        )
+                    except ReferenceReselectionRequested:
+                        logging.info(
+                            "사용자가 OCR 기준 페이지 대신 다른 페이지 선택을 요청했습니다."
+                        )
+                        continue
+                    break
             if not mapping:
                 raise ValueError(f"[{master_sheet}] 저장된 PDF 영역 매핑이 없습니다.")
             configured_sets.append(
@@ -2453,14 +2818,11 @@ def run_application(parent_root, force_ocr=False):
                         with fitz.open(pdf_path) as document:
                             total_pages += document.page_count
                             for page in document:
-                                if int(page.rotation) % 360:
-                                    planned_work.append(("skipped", 1))
-                                    continue
                                 try:
                                     has_text = bool(page.get_text("text").strip())
                                 except Exception:
                                     has_text = False
-                                planned_work.append(("ocr" if force_ocr or not has_text else "native_text", ocr_weight))
+                                planned_work.append(("ocr" if force_ocr or int(page.rotation) % 360 or not has_text else "native_text", ocr_weight))
                     except Exception:
                         pass
         from processing_cancellation import ProcessingCancellation
@@ -2480,6 +2842,9 @@ def run_application(parent_root, force_ocr=False):
             "empty_pages": [],
             "rotated_pages": [],
             "ocr_unavailable_pages": [],
+            "deskew_pages": [],
+            "orientation_pages": [],
+            "preprocess_rejected_pages": [],
         }
         any_data_extracted = False
         for configured in configured_sets:

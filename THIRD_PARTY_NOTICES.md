@@ -14,6 +14,7 @@ DnS Auto는 다음 오픈소스 라이브러리와 OCR 모델을 사용합니다
 | pywin32 | 312 | PSF | https://github.com/mhammond/pywin32 |
 | xlrd | 2.0.2 | BSD | https://xlrd.readthedocs.io/ |
 | NumPy | 2.4.6 | BSD-3-Clause | https://numpy.org/ |
+| OpenCV (opencv-python) | 5.0.0.93 | Apache-2.0 및 포함된 제3자 고지 | https://opencv.org/ |
 | RapidOCR | 3.9.2 | Apache-2.0(프로그램 코드) | https://github.com/RapidAI/RapidOCR |
 | ONNX Runtime | 1.28.0 | MIT | https://onnxruntime.ai/ |
 | PyInstaller | 6.21.0 | GPL-2.0-or-later 및 부트로더 예외 | https://pyinstaller.org/ |
@@ -31,7 +32,6 @@ RapidOCR, ONNX Runtime 및 openpyxl을 설치하면 다음 패키지도 함께 �
 |---|---:|---|
 | colorlog | 6.12.0 | MIT |
 | OmegaConf | 2.3.1 | BSD |
-| opencv-python | 5.0.0.93 | Apache-2.0 및 포함된 제3자 고지 |
 | pyclipper | 1.4.0 | MIT |
 | PyYAML | 6.0.3 | MIT |
 | Requests | 2.34.2 | Apache-2.0 |
@@ -58,12 +58,14 @@ PaddleOCR 계열 모델이며, 원 모델 저작권은 Baidu/PaddleOCR 측에 �
 | `ch_PP-OCRv5_det_mobile.onnx` | `4D97C44A20D30A81AAD087D6A396B08F786C4635742AFC391F6621F5C6AE78AE` |
 | `ch_ppocr_mobile_v2.0_cls_mobile.onnx` | `E47ACEDF663230F8863FF1AB0E64DD2D82B838FCEB5957146DAB185A89D6215C` |
 | `korean_PP-OCRv5_rec_mobile.onnx` | `CD6E2EA50F6943CA7271EB8C56A877A5A90720B7047FE9C41A2E541A25773C9B` |
+| `PP-LCNet_x1_0_doc_ori.onnx` | `1DB9914A3BEB04181FDE445B2FEF96B850072F89A2FA8AA71EBEF4ED03B8074F` |
 
 원본 배포 위치:
 
 - https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/det/ch_PP-OCRv5_det_mobile.onnx
 - https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx
 - https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/rec/korean_PP-OCRv5_rec_mobile.onnx
+- PP-LCNet_x1_0_doc_ori 공식 Paddle 추론 모델 (Apache-2.0): https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-LCNet_x1_0_doc_ori_infer.tar
 
 관련 프로젝트:
 
