@@ -1074,8 +1074,19 @@ class ReferencePageSelector:
         )
         self.type_label.pack(anchor="w", pady=(4, 0))
 
-        self.canvas = tk.Canvas(self.root, bg="#777777")
-        self.canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        preview_frame = tk.Frame(self.root, bg="#777777")
+        preview_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.canvas = tk.Canvas(preview_frame, bg="#777777", highlightthickness=0)
+        self.v_scroll = tk.Scrollbar(
+            preview_frame, orient=tk.VERTICAL, command=self.canvas.yview
+        )
+        self.canvas.configure(yscrollcommand=self.v_scroll.set)
+        self.v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._resize_job = None
+        self._rendered_width = 0
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
         controls = tk.Frame(self.root, padx=10, pady=8)
         controls.pack(fill=tk.X)
         self.previous_file_button = tk.Button(
@@ -1136,21 +1147,51 @@ class ReferencePageSelector:
             "rotation": int(page.rotation) % 360,
         }
 
+    def _render_preview(self, reset_scroll=False, force=False):
+        if self.document is None or not self.root.winfo_exists():
+            return
+        canvas_width = self.canvas.winfo_width()
+        if canvas_width <= 1:
+            return
+        target_width = max(canvas_width - 2, 1)
+        if not force and abs(target_width - self._rendered_width) < 2:
+            return
+
+        previous_y = self.canvas.yview()[0] if self.canvas.bbox("all") else 0.0
+        page = self.document[self.state.page_index]
+        page_width = max(float(page.rect.width), 1.0)
+        scale = target_width / page_width
+        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+        image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        self.preview_image = ImageTk.PhotoImage(image)
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.preview_image)
+        self.canvas.configure(scrollregion=(0, 0, pix.width, pix.height))
+        self._rendered_width = target_width
+        self.canvas.xview_moveto(0)
+        self.canvas.yview_moveto(0 if reset_scroll else previous_y)
+
+    def _on_canvas_configure(self, event):
+        if event.width <= 1 or abs((event.width - 2) - self._rendered_width) < 2:
+            return
+        if self._resize_job is not None:
+            self.root.after_cancel(self._resize_job)
+        self._resize_job = self.root.after(100, self._finish_resize_render)
+
+    def _finish_resize_render(self):
+        self._resize_job = None
+        self._render_preview(reset_scroll=False)
+
+    def _on_mouse_wheel(self, event):
+        if event.delta:
+            direction = -1 if event.delta > 0 else 1
+            self.canvas.yview_scroll(direction * 3, "units")
+        return "break"
+
     def _render(self):
         if self.document is not None:
             self.document.close()
         self.document = fitz.open(self.state.current_path)
-        page = self.document[self.state.page_index]
-        pix = page.get_pixmap(matrix=fitz.Matrix(1.15, 1.15), alpha=False)
-        image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-        max_width = max(self.canvas.winfo_width() - 20, 680)
-        max_height = max(self.canvas.winfo_height() - 20, 440)
-        image.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
-        self.preview_image = ImageTk.PhotoImage(image)
-        self.canvas.delete("all")
-        self.canvas.create_image(
-            max_width / 2, 10, anchor=tk.N, image=self.preview_image
-        )
         candidate = self._candidate()
         self.page_label.configure(
             text=(
@@ -1177,6 +1218,8 @@ class ReferencePageSelector:
         self.next_file_button.configure(
             state=tk.NORMAL if self.state.can_next_file else tk.DISABLED
         )
+        self.root.update_idletasks()
+        self._render_preview(reset_scroll=True, force=True)
 
     def _move(self, method_name):
         getattr(self.state, method_name)()

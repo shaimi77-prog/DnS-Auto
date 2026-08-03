@@ -34,10 +34,12 @@ def main():
         make_pdf(second, 2, "SECOND")
         suggestion = select_reference_page([str(first), str(second)])
         root = tk.Tk()
-        root.withdraw()
+        root.geometry("1x1-100-100")
+        root.update_idletasks()
 
         def exercise():
             top = next(child for child in root.winfo_children() if isinstance(child, tk.Toplevel))
+            top.after(5000, lambda: top.destroy() if top.winfo_exists() else None)
             widgets = list(descendants(top))
             buttons = {
                 widget.cget("text"): widget
@@ -45,21 +47,54 @@ def main():
                 if isinstance(widget, tk.Button)
             }
             labels = [widget for widget in widgets if isinstance(widget, tk.Label)]
-            buttons["다음 페이지"].invoke()
-            buttons["다음 페이지"].invoke()
-            buttons["다음 페이지"].invoke()
-            checks["manual_beyond_three_pages"] = any(
-                "4페이지" in label.cget("text") for label in labels
+            canvas = next(widget for widget in widgets if isinstance(widget, tk.Canvas))
+            initial_bbox = canvas.bbox("all")
+            checks["initial_preview_fills_width"] = (
+                initial_bbox is not None
+                and initial_bbox[2] >= canvas.winfo_width() - 4
             )
-            buttons["다음 파일"].invoke()
-            checks["next_file_opens_first_page"] = any(
-                "second.pdf / 1페이지" in label.cget("text") for label in labels
+            checks["vertical_scroll_region_created"] = (
+                initial_bbox is not None and initial_bbox[3] > canvas.winfo_height()
             )
-            checks["previous_page_disabled_at_first"] = (
-                str(buttons["이전 페이지"].cget("state")) == str(tk.DISABLED)
-            )
-            buttons["이 페이지를 기준으로 선택"].invoke()
+            initial_width = initial_bbox[2]
+            top.geometry("1200x900")
 
+            def finish_after_resize():
+                resized_bbox = canvas.bbox("all")
+                checks["preview_grows_with_window"] = (
+                    resized_bbox is not None and resized_bbox[2] > initial_width
+                )
+                before_scroll = canvas.yview()[0]
+                canvas.event_generate("<MouseWheel>", delta=-120)
+                top.update_idletasks()
+                checks["mouse_wheel_scrolls"] = canvas.yview()[0] > before_scroll
+
+                buttons["다음 페이지"].invoke()
+                buttons["다음 페이지"].invoke()
+                buttons["다음 페이지"].invoke()
+                checks["manual_beyond_three_pages"] = any(
+                    "4페이지" in label.cget("text") for label in labels
+                )
+                buttons["다음 파일"].invoke()
+                checks["next_file_opens_first_page"] = any(
+                    "second.pdf / 1페이지" in label.cget("text") for label in labels
+                )
+                buttons["이전 페이지"].invoke()
+                checks["previous_page_wraps_to_last"] = any(
+                    "second.pdf / 2페이지" in label.cget("text") for label in labels
+                )
+                buttons["다음 페이지"].invoke()
+                buttons["다음 파일"].invoke()
+                checks["next_file_wraps_to_first"] = any(
+                    "first.pdf / 1페이지" in label.cget("text") for label in labels
+                )
+                buttons["이전 파일"].invoke()
+                checks["previous_file_wraps_to_last"] = any(
+                    "second.pdf / 1페이지" in label.cget("text") for label in labels
+                )
+                buttons["이 페이지를 기준으로 선택"].invoke()
+
+            root.after(180, finish_after_resize)
         root.after(250, exercise)
         selector = ReferencePageSelector(
             [str(first), str(second)], suggestion, parent_root=root

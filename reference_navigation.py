@@ -16,8 +16,22 @@ class ReferenceNavigationState:
     page_index: int = 0
 
     def __post_init__(self):
-        self.pdf_paths = tuple(os.path.abspath(path) for path in self.pdf_paths)
-        self.page_counts = tuple(int(count) for count in self.page_counts)
+        normalized_paths = tuple(os.path.abspath(path) for path in self.pdf_paths)
+        normalized_counts = tuple(int(count) for count in self.page_counts)
+        if len(normalized_paths) != len(normalized_counts):
+            raise ValueError("기준 페이지 탐색 파일과 페이지 수가 올바르지 않습니다.")
+        unique_paths = []
+        unique_counts = []
+        seen_paths = set()
+        for path, count in zip(normalized_paths, normalized_counts):
+            key = os.path.normcase(path)
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            unique_paths.append(path)
+            unique_counts.append(count)
+        self.pdf_paths = tuple(unique_paths)
+        self.page_counts = tuple(unique_counts)
         if not self.pdf_paths or len(self.pdf_paths) != len(self.page_counts):
             raise ValueError("기준 페이지 탐색 파일과 페이지 수가 올바르지 않습니다.")
         if any(count < 1 for count in self.page_counts):
@@ -49,38 +63,38 @@ class ReferenceNavigationState:
 
     @property
     def can_previous_file(self):
-        return self.file_index > 0
+        return len(self.pdf_paths) > 1
 
     @property
     def can_next_file(self):
-        return self.file_index < len(self.pdf_paths) - 1
+        return len(self.pdf_paths) > 1
 
     @property
     def can_previous_page(self):
-        return self.page_index > 0
+        return self.current_page_count > 1
 
     @property
     def can_next_page(self):
-        return self.page_index < self.current_page_count - 1
+        return self.current_page_count > 1
 
     def previous_file(self):
-        if self.can_previous_file:
-            self.file_index -= 1
+        if len(self.pdf_paths) > 1:
+            self.file_index = (self.file_index - 1) % len(self.pdf_paths)
             self.page_index = 0
         return self
 
     def next_file(self):
-        if self.can_next_file:
-            self.file_index += 1
+        if len(self.pdf_paths) > 1:
+            self.file_index = (self.file_index + 1) % len(self.pdf_paths)
             self.page_index = 0
         return self
 
     def previous_page(self):
-        if self.can_previous_page:
-            self.page_index -= 1
+        if self.current_page_count > 1:
+            self.page_index = (self.page_index - 1) % self.current_page_count
         return self
 
     def next_page(self):
-        if self.can_next_page:
-            self.page_index += 1
+        if self.current_page_count > 1:
+            self.page_index = (self.page_index + 1) % self.current_page_count
         return self
