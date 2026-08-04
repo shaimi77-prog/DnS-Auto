@@ -1,0 +1,47 @@
+name: Build Windows portable artifact
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Create build environment
+        shell: pwsh
+        run: |
+          python -m venv .venv_build311
+          .\.venv_build311\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv_build311\Scripts\python.exe -m pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Build GUI and MCP portable bundle
+        shell: pwsh
+        run: |
+          & .\build_portable.ps1
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          $source = Join-Path (Split-Path $PWD -Parent) "release\DnS_Auto_Portable.zip"
+          Copy-Item -LiteralPath $source -Destination (Join-Path $PWD "DnS_Auto_Portable.zip")
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DnS-Auto-Windows-portable-${{ github.sha }}
+          path: DnS_Auto_Portable.zip
+          if-no-files-found: error
+          retention-days: 14

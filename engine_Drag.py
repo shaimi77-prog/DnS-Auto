@@ -10,8 +10,10 @@ import sys
 import threading
 import time
 import tkinter as tk
+import unicodedata
 from tkinter import filedialog, messagebox, ttk
 
+import cv2
 import fitz  # PyMuPDF
 import numpy as np
 from openpyxl import load_workbook
@@ -50,8 +52,18 @@ REFERENCE_SCAN_MAX_PAGES = 3
 MIN_NATIVE_TEXT_CHARS = 30
 MIN_NATIVE_TEXT_BLOCKS = 3
 OCR_KEYWORD_SEARCH_DPI = 150
-OCR_VALUE_RECOGNITION_DPI = 180
+OCR_VALUE_RECOGNITION_DPI = 210
 OCR_MIN_TEXT_SCORE = 0.4
+OCR_VALUE_DET_LIMIT_SIDE_LEN = 224
+OCR_VALUE_DET_BOX_THRESHOLD = 0.5
+OCR_VALUE_DET_UNCLIP_RATIO = 1.2
+OCR_VALUE_GATE_MAX_GRAY_STD = 40.363036259447334
+OCR_VALUE_GATE_MAX_LAPLACIAN_VARIANCE = 749.5608228287067
+OCR_VALUE_UNSHARP_SIGMA = 0.8
+OCR_VALUE_UNSHARP_AMOUNT = 0.20
+OCR_VALUE_FORMAT_DOMINANCE_RATIO = 2.0 / 3.0
+OCR_VALUE_RETRY_LIMIT_SIDE_LEN = 384
+OCR_VALUE_FINAL_RETRY_LIMIT_SIDE_LEN = 736
 OCR_CANDIDATE_MERGE_DISTANCE_PT = 5.0
 OCR_CANDIDATE_IOU_THRESHOLD = 0.6
 
@@ -97,6 +109,8 @@ class HybridTextExtractor:
         self._ocr_unavailable_logged = False
         self._ocr_disabled_for_work = False
         self._ocr_cache = {}
+        self._ocr_lock = threading.RLock()
+        self._ocr_statistics = self._new_ocr_statistics()
         self.last_keyword_status = None
         self.last_keyword_reason = None
         self.last_ocr_initialization_seconds = 0.0
@@ -113,6 +127,7 @@ class HybridTextExtractor:
     def reset_work_cache(self):
         """새 취합 작업을 시작할 때 메모리 OCR 캐시와 상태를 초기화합니다."""
         self._ocr_cache.clear()
+        self._ocr_statistics = self._new_ocr_statistics()
         self.last_keyword_status = None
         self.last_keyword_reason = None
         self.last_ocr_initialization_seconds = 0.0
@@ -121,6 +136,152 @@ class HybridTextExtractor:
         self._ocr_disabled_for_work = False
         if self.ocr is not None:
             self.ocr_unavailable_reason = None
+
+    @staticmethod
+    def _new_ocr_statistics():
+        return {
+            "page_ocr_inference_count": 0,
+            "anchor_region_retry_count": 0,
+            "anchor_region_retry_match_count": 0,
+            "value_primary_ocr_count": 0,
+            "value_enhancement_gate_count": 0,
+            "value_enhancement_ocr_count": 0,
+            "value_low_quality_retry_count": 0,
+            "value_format_outlier_retry_count": 0,
+            "value_enhancement_reuse_count": 0,
+            "value_min384_retry_count": 0,
+            "value_min736_retry_count": 0,
+            "value_primary_selected_count": 0,
+            "value_enhancement_selected_count": 0,
+            "value_large_detect_selected_count": 0,
+            "value_result_conflict_count": 0,
+            "total_ocr_inference_count": 0,
+        }
+
+    def ocr_statistics(self):
+        """Return privacy-safe OCR counters for GUI and MCP metadata."""
+        return dict(self._ocr_statistics)
+
+    @staticmethod
+    def _value_image_quality(rgb):
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        return {
+            "gray_std": float(gray.std()),
+            "laplacian_variance": float(
+                cv2.Laplacian(gray, cv2.CV_64F).var()
+            ),
+        }
+
+    @staticmethod
+    def _value_enhancement_gate(quality):
+        return (
+            quality["gray_std"] <= OCR_VALUE_GATE_MAX_GRAY_STD
+            and quality["laplacian_variance"]
+            <= OCR_VALUE_GATE_MAX_LAPLACIAN_VARIANCE
+        )
+
+    @staticmethod
+    def _enhance_value_image(rgb):
+        blurred = cv2.GaussianBlur(
+            rgb,
+            (0, 0),
+            OCR_VALUE_UNSHARP_SIGMA,
+        )
+        return cv2.addWeighted(
+            rgb,
+            1.0 + OCR_VALUE_UNSHARP_AMOUNT,
+            blurred,
+            -OCR_VALUE_UNSHARP_AMOUNT,
+            0,
+        )
+
+    @staticmethod
+    def classify_value_format(text):
+        """Classify one complete cell without changing its stored text."""
+        normalized = unicodedata.normalize("NFKC", text or "")
+        significant = [
+            char for char in normalized
+            if not char.isspace() and char not in {"-", ".", ","}
+        ]
+        if not significant:
+            return "EMPTY"
+        has_letters = any(unicodedata.category(char).startswith("L") for char in significant)
+        has_digits = any(unicodedata.category(char).startswith("N") for char in significant)
+        has_symbols = any(
+            not unicodedata.category(char).startswith(("L", "N"))
+            for char in significant
+        )
+        parts = []
+        if has_letters:
+            parts.append("LETTERS")
+        if has_digits:
+            parts.append("DIGITS")
+        if has_symbols:
+            parts.append("SYMBOLS")
+        return "_".join(parts)
+
+    @classmethod
+    def dominant_value_format(cls, values):
+        """Return a 2/3-dominant non-empty cell format, without a sample floor."""
+        formats = [cls.classify_value_format(value) for value in values]
+        formats = [value_format for value_format in formats if value_format != "EMPTY"]
+        if len(formats) <= 1:
+            return None
+        counts = {}
+        for value_format in formats:
+            counts[value_format] = counts.get(value_format, 0) + 1
+        selected, count = max(counts.items(), key=lambda item: (item[1], item[0]))
+        if count / len(formats) >= OCR_VALUE_FORMAT_DOMINANCE_RATIO:
+            return selected
+        return None
+
+    @staticmethod
+    def _comparison_text(text):
+        """Normalize whitespace only; punctuation remains part of containment."""
+        return " ".join((text or "").split()).casefold()
+
+    @classmethod
+    def select_reinforced_value(cls, primary_text, reinforced_text, reference_format):
+        """Apply the approved conservative base/reinforcement selection contract."""
+        primary = cls._comparison_text(primary_text)
+        reinforced = cls._comparison_text(reinforced_text)
+        if not reinforced:
+            return primary_text, "REINFORCED_EMPTY_KEEP_BASE"
+        if not reference_format:
+            return primary_text, "NO_HEADER_FORMAT_KEEP_BASE"
+        primary_format = cls.classify_value_format(primary_text)
+        reinforced_format = cls.classify_value_format(reinforced_text)
+        if (
+            primary_format != reference_format
+            and reinforced_format == reference_format
+        ):
+            return reinforced_text, "HEADER_FORMAT_RECOVERED_SELECT"
+        if not primary:
+            return primary_text, "EMPTY_BASE_FORMAT_MISMATCH_KEEP_BASE"
+        if reinforced == primary or reinforced in primary:
+            return primary_text, "ENHANCED_SUBSET_KEEP_BASE"
+        if primary in reinforced and reinforced_format == reference_format:
+            return reinforced_text, "ENHANCED_SUPERSET_FORMAT_MATCH_SELECT"
+        return primary_text, "ENHANCED_CONFLICT_KEEP_BASE"
+    def _run_value_ocr(self, image, limit_side_len=OCR_VALUE_DET_LIMIT_SIDE_LEN):
+        detector = self.ocr.text_det
+        with self._ocr_lock:
+            original_limit_type = detector.limit_type
+            original_limit_side_len = detector.limit_side_len
+            try:
+                detector.limit_type = "min"
+                detector.limit_side_len = limit_side_len
+                return self.ocr(
+                    image,
+                    use_det=True,
+                    use_cls=False,
+                    use_rec=True,
+                    box_thresh=OCR_VALUE_DET_BOX_THRESHOLD,
+                    unclip_ratio=OCR_VALUE_DET_UNCLIP_RATIO,
+                )
+            finally:
+                detector.limit_type = original_limit_type
+                detector.limit_side_len = original_limit_side_len
 
     def release_pdf_cache(self, pdf_path):
         """처리가 끝난 PDF의 OCR 결과를 즉시 해제합니다."""
@@ -325,12 +486,13 @@ class HybridTextExtractor:
                     preprocess_result.angle_dispersion,
                 )
         try:
-            result = self.ocr(
-                ocr_input,
-                use_det=True,
-                use_cls=False,
-                use_rec=True,
-            )
+            with self._ocr_lock:
+                result = self.ocr(
+                    ocr_input,
+                    use_det=True,
+                    use_cls=False,
+                    use_rec=True,
+                )
         except Exception as error:
             self._set_ocr_unavailable("OCR_EXECUTION_ERROR", str(error))
             logging.debug("OCR 검출 실행 예외", exc_info=True)
@@ -364,7 +526,89 @@ class HybridTextExtractor:
 
     def _ocr_page_detect(self, page):
         """Cache one full-page OCR result for keyword tracking and value extraction."""
-        return self._ocr_detect(page, page.rect, OCR_KEYWORD_SEARCH_DPI)
+        key = (
+            self._page_identity(page),
+            int(page.number),
+            tuple(round(value, 2) for value in page.rect),
+            int(OCR_KEYWORD_SEARCH_DPI),
+            True,
+        )
+        was_cached = key in self._ocr_cache
+        detected = self._ocr_detect(page, page.rect, OCR_KEYWORD_SEARCH_DPI)
+        if detected is not None and not was_cached:
+            self._ocr_statistics["page_ocr_inference_count"] += 1
+            self._ocr_statistics["total_ocr_inference_count"] += 1
+        return detected
+
+    def _ocr_value_detect(
+        self, page, clip, *, enhance=False,
+        limit_side_len=OCR_VALUE_DET_LIMIT_SIDE_LEN,
+    ):
+        """Run the approved value-only OCR policy without changing page OCR."""
+        key = (
+            self._page_identity(page),
+            int(page.number),
+            tuple(round(value, 2) for value in clip),
+            OCR_VALUE_RECOGNITION_DPI,
+            "value-enhanced" if enhance else "value-primary",
+            int(limit_side_len),
+        )
+        if key in self._ocr_cache:
+            return self._ocr_cache[key]
+        if not self.ensure_ocr():
+            return None
+        try:
+            pix = page.get_pixmap(
+                clip=clip,
+                dpi=OCR_VALUE_RECOGNITION_DPI,
+                alpha=False,
+            )
+            rgb = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                pix.height,
+                pix.width,
+                pix.n,
+            )[:, :, :3].copy()
+            quality = self._value_image_quality(rgb)
+            if enhance:
+                rgb = self._enhance_value_image(rgb)
+            encoded, buffer = cv2.imencode(
+                ".png",
+                cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
+            )
+            if not encoded:
+                raise RuntimeError("Value-region PNG encoding failed")
+            result = self._run_value_ocr(
+                buffer.tobytes(), limit_side_len=limit_side_len
+            )
+        except Exception as error:
+            self._set_ocr_unavailable("OCR_EXECUTION_ERROR", str(error))
+            logging.debug("Value-region OCR failed", exc_info=True)
+            return None
+        boxes = getattr(result, "boxes", None)
+        compact = {
+            "width": pix.width,
+            "height": pix.height,
+            "source_width": pix.width,
+            "source_height": pix.height,
+            "transform_matrix": np.eye(3, dtype=np.float64),
+            "preprocess_status": "value_enhanced" if enhance else "not_requested",
+            "clip": tuple(clip),
+            "boxes": tuple(boxes) if boxes is not None else (),
+            "texts": tuple(getattr(result, "txts", None) or ()),
+            "scores": tuple(getattr(result, "scores", None) or ()),
+            "quality": quality,
+        }
+        if limit_side_len == OCR_VALUE_RETRY_LIMIT_SIDE_LEN:
+            self._ocr_statistics["value_min384_retry_count"] += 1
+        elif limit_side_len == OCR_VALUE_FINAL_RETRY_LIMIT_SIDE_LEN:
+            self._ocr_statistics["value_min736_retry_count"] += 1
+        elif enhance:
+            self._ocr_statistics["value_enhancement_ocr_count"] += 1
+        else:
+            self._ocr_statistics["value_primary_ocr_count"] += 1
+        self._ocr_statistics["total_ocr_inference_count"] += 1
+        self._ocr_cache[key] = compact
+        return compact
 
     @staticmethod
     def _ocr_box_to_pdf_rect(
@@ -479,6 +723,86 @@ class HybridTextExtractor:
             for item in self._merge_ocr_candidates(candidates)
         ]
 
+    def _retry_ocr_keyword_candidate(self, page, origin_rect, keyword):
+        """Retry one failed anchor in the fifth-stage area at 210 DPI."""
+        if not keyword:
+            return None
+        normalized_keyword = self._normalized_keyword(keyword)
+        width = max(origin_rect.width, 5)
+        height = max(origin_rect.height, 5)
+        page_rect = page.rect
+        clips = [
+            fitz.Rect(
+                max(page_rect.x0, origin_rect.x0 - width * step / 5),
+                max(page_rect.y0, origin_rect.y0 - height * step / 5),
+                min(page_rect.x1, origin_rect.x1 + width * step / 5),
+                min(page_rect.y1, origin_rect.y1 + height * step / 5),
+            )
+            for step in range(1, 6)
+        ]
+        retry_clip = clips[-1]
+        key = (
+            self._page_identity(page),
+            int(page.number),
+            tuple(round(value, 2) for value in retry_clip),
+            int(OCR_VALUE_RECOGNITION_DPI),
+            True,
+        )
+        was_cached = key in self._ocr_cache
+        detected = self._ocr_detect(page, retry_clip, OCR_VALUE_RECOGNITION_DPI)
+        if detected is None:
+            return None
+        if not was_cached:
+            self._ocr_statistics["anchor_region_retry_count"] += 1
+            self._ocr_statistics["total_ocr_inference_count"] += 1
+
+        candidates = []
+        for box, text, score in zip(
+            detected["boxes"], detected["texts"], detected["scores"]
+        ):
+            if (
+                score is None
+                or score < OCR_MIN_TEXT_SCORE
+                or normalized_keyword not in self._normalized_keyword(text)
+            ):
+                continue
+            rect = self._ocr_box_to_pdf_rect(
+                box,
+                retry_clip,
+                detected["width"],
+                detected["height"],
+                transform_matrix=detected.get("transform_matrix"),
+                source_width=detected.get("source_width"),
+                source_height=detected.get("source_height"),
+            )
+            if not retry_clip.intersects(rect):
+                continue
+            rect = self._keyword_subrect(rect, text, keyword)
+            step = next(
+                (
+                    index
+                    for index, step_clip in enumerate(clips, start=1)
+                    if step_clip.contains(rect)
+                ),
+                5,
+            )
+            candidates.append({"rect": rect, "score": float(score), "step": step})
+
+        merged = self._merge_ocr_candidates(candidates)
+        if not merged:
+            return None
+        selected = min(
+            merged,
+            key=lambda item: (
+                item["step"],
+                self._distance(origin_rect, item["rect"]),
+                item["rect"].y0,
+                item["rect"].x0,
+            ),
+        )
+        self._ocr_statistics["anchor_region_retry_match_count"] += 1
+        return selected["rect"]
+
     def find_keyword_candidates(self, page, origin_rect, keyword):
         """네이티브 우선, OCR 폴백으로 5단계 거리순 후보를 반환합니다."""
         self.last_keyword_status = None
@@ -585,6 +909,23 @@ class HybridTextExtractor:
         tracking_anchor = mapping.get("tracking_anchor_rect") or template_anchor
         search_origin = self._tracking_search_origin(page, drag_rect, tracking_anchor)
         candidates = self.find_keyword_candidates(page, search_origin, keyword)
+        if not candidates and self.last_keyword_status == OCR_NO_MATCH:
+            retry_candidate = self._retry_ocr_keyword_candidate(
+                page, search_origin, keyword
+            )
+            if retry_candidate is not None:
+                candidates = [retry_candidate]
+                self.last_keyword_status = OCR_MATCH
+                logging.info(
+                    "ANCHOR_REGION_RETRY_MATCH: 파일=%s, 페이지=%s, "
+                    "키워드=%s, dpi=%s",
+                    os.path.basename(
+                        getattr(page.parent, "name", "") or "(메모리 PDF)"
+                    ),
+                    page.number + 1,
+                    keyword,
+                    OCR_VALUE_RECOGNITION_DPI,
+                )
         if not candidates:
             if preprocess_result is not None and preprocess_result.orientation_applied:
                 preprocess_result.status = "rejected"
@@ -749,6 +1090,45 @@ class HybridTextExtractor:
             )
         return recognized
 
+    def _recognized_region_text(self, detected):
+        items = self._detected_items(detected)
+        return self._combine_positioned_text(
+            [(item["rect"], item["text"]) for item in items]
+        )
+
+    @staticmethod
+    def _value_region_has_character_ink(page, rect):
+        """Cheap retry gate; render is local and discarded before returning."""
+        pix = page.get_pixmap(clip=rect, dpi=110, alpha=False)
+        rgb = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+            pix.height, pix.width, pix.n
+        )[:, :, :3]
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        margin_y = max(1, int(gray.shape[0] * 0.05))
+        margin_x = max(1, int(gray.shape[1] * 0.03))
+        inner = gray[margin_y:gray.shape[0] - margin_y,
+                     margin_x:gray.shape[1] - margin_x]
+        if inner.size == 0:
+            return False
+        _threshold, binary = cv2.threshold(
+            inner, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        )
+        component_count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            binary, connectivity=8
+        )
+        area_limit = inner.shape[0] * inner.shape[1] * 0.30
+        for index in range(1, component_count):
+            width = stats[index, cv2.CC_STAT_WIDTH]
+            height = stats[index, cv2.CC_STAT_HEIGHT]
+            area = stats[index, cv2.CC_STAT_AREA]
+            if (
+                area >= 3
+                and area <= area_limit
+                and 2 <= height <= inner.shape[0] * 0.85
+                and width <= inner.shape[1] * 0.90
+            ):
+                return True
+        return False
     def _recognized_consensus_text(
         self,
         page_detected,
@@ -824,34 +1204,82 @@ class HybridTextExtractor:
         mapping,
         force_ocr=False,
         dpi=OCR_VALUE_RECOGNITION_DPI,
+        return_details=False,
     ):
         if force_ocr:
             self._ocr_page_detect(page)
         rect = self.adjusted_rect(page, mapping)
+        empty_details = {
+            "mode": "empty",
+            "primary_text": "",
+            "enhanced_text": None,
+            "low_quality_gate": False,
+            "rect": tuple(rect),
+            "page_detected": None,
+        }
         if rect.width < 5 or rect.height < 5:
             logging.warning("추출 영역이 5pt 미만이므로 판독을 생략합니다.")
-            return ""
+            return ("", empty_details) if return_details else ""
         if not force_ocr:
             try:
                 native_text = page.get_text("text", clip=rect).replace("\n", " ").strip()
                 if native_text:
-                    return native_text
+                    details = {
+                        **empty_details,
+                        "mode": "native",
+                        "primary_text": native_text,
+                    }
+                    return (native_text, details) if return_details else native_text
             except Exception as error:
                 logging.warning(f"Native 텍스트 추출 실패, OCR로 전환합니다: {error}")
         if not self.ensure_ocr():
-            return ""
+            return ("", empty_details) if return_details else ""
         try:
             page_detected = self._ocr_page_detect(page)
-            region_detected = self._ocr_detect(page, rect, dpi)
-            return self._recognized_consensus_text(
+            region_detected = self._ocr_value_detect(page, rect)
+            primary_text = self._recognized_consensus_text(
                 page_detected,
                 region_detected,
                 rect,
             )
+            quality = (region_detected or {}).get("quality")
+            low_quality_gate = bool(
+                quality and self._value_enhancement_gate(quality)
+            )
+            enhanced_text = None
+            if low_quality_gate:
+                self._ocr_statistics["value_enhancement_gate_count"] += 1
+                self._ocr_statistics["value_low_quality_retry_count"] += 1
+                enhanced_detected = self._ocr_value_detect(
+                    page,
+                    rect,
+                    enhance=True,
+                )
+                enhanced_text = self._recognized_consensus_text(
+                    page_detected,
+                    enhanced_detected,
+                    rect,
+                )
+                if self._comparison_text(enhanced_text) != self._comparison_text(primary_text):
+                    self._ocr_statistics["value_result_conflict_count"] += 1
+                    logging.info(
+                        "VALUE_RESULT_CONFLICT: page=%s, reason=low_contrast_and_blur",
+                        page.number + 1,
+                    )
+            details = {
+                "mode": "ocr",
+                "primary_text": primary_text,
+                "enhanced_text": enhanced_text,
+                "low_quality_gate": low_quality_gate,
+                "rect": tuple(rect),
+                "page_detected": page_detected,
+            }
+            # Header-format selection is intentionally deferred to _collect_pdf_rows.
+            return (primary_text, details) if return_details else primary_text
         except Exception as error:
             self._set_ocr_unavailable("OCR_EXECUTION_ERROR", str(error))
             logging.debug("OCR 판독 예외", exc_info=True)
-            return ""
+            return ("", empty_details) if return_details else ""
 
 
 TEXT_EXTRACTOR = HybridTextExtractor()
@@ -2551,6 +2979,167 @@ def _offer_profile_save(template_path, configured_sets, parent_root):
             )
 
 
+def _reference_format_from_values(values, *, allow_single):
+    formats = [
+        TEXT_EXTRACTOR.classify_value_format(value)
+        for value in values
+        if TEXT_EXTRACTOR.classify_value_format(value) != "EMPTY"
+    ]
+    if not formats:
+        return None
+    if len(formats) == 1:
+        return formats[0] if allow_single else None
+    counts = {}
+    for value_format in formats:
+        counts[value_format] = counts.get(value_format, 0) + 1
+    selected, count = max(counts.items(), key=lambda item: (item[1], item[0]))
+    return (
+        selected
+        if count / len(formats) >= OCR_VALUE_FORMAT_DOMINANCE_RATIO
+        else None
+    )
+
+
+def _resolve_header_reference_formats(records, headers):
+    references = {}
+    for header in headers:
+        if not header:
+            continue
+        native_values = [
+            record["values"].get(header, "")
+            for record in records
+            if record["details"].get(header, {}).get("mode") == "native"
+        ]
+        reference = _reference_format_from_values(
+            native_values, allow_single=True
+        )
+        if reference is None:
+            ocr_values = [
+                record["details"].get(header, {}).get("primary_text", "")
+                for record in records
+                if record["details"].get(header, {}).get("mode") == "ocr"
+            ]
+            reference = _reference_format_from_values(
+                ocr_values, allow_single=False
+            )
+        references[header] = reference
+    return references
+
+
+def _apply_value_reinforcement(records, headers, references, cancellation=None):
+    open_documents = {}
+    try:
+        for record in records:
+            if cancellation is not None and cancellation.should_cancel():
+                break
+            for header in headers:
+                if not header:
+                    continue
+                details = record["details"].get(header, {})
+                if details.get("mode") != "ocr":
+                    continue
+                primary_text = details.get("primary_text", "")
+                enhanced_text = details.get("enhanced_text")
+                reference_format = references.get(header)
+                is_outlier = bool(
+                    reference_format
+                    and TEXT_EXTRACTOR.classify_value_format(primary_text)
+                    != reference_format
+                )
+                page = None
+                rect = fitz.Rect(details.get("rect", (0, 0, 0, 0)))
+                if is_outlier and enhanced_text is None:
+                    document = open_documents.get(record["pdf_path"])
+                    if document is None:
+                        document = fitz.open(record["pdf_path"])
+                        open_documents[record["pdf_path"]] = document
+                    page = document[record["page_index"]]
+                    detected = TEXT_EXTRACTOR._ocr_value_detect(
+                        page, rect, enhance=True
+                    )
+                    enhanced_text = TEXT_EXTRACTOR._recognized_consensus_text(
+                        details.get("page_detected"), detected, rect
+                    )
+                    details["enhanced_text"] = enhanced_text
+                    TEXT_EXTRACTOR._ocr_statistics[
+                        "value_format_outlier_retry_count"
+                    ] += 1
+                elif is_outlier and enhanced_text is not None:
+                    TEXT_EXTRACTOR._ocr_statistics[
+                        "value_enhancement_reuse_count"
+                    ] += 1
+
+                selected_text = primary_text
+                selection_reason = "PRIMARY_NOT_RETRIED"
+                if enhanced_text is not None:
+                    selected_text, selection_reason = (
+                        TEXT_EXTRACTOR.select_reinforced_value(
+                            primary_text, enhanced_text, reference_format
+                        )
+                    )
+                    if (
+                        TEXT_EXTRACTOR._comparison_text(primary_text)
+                        != TEXT_EXTRACTOR._comparison_text(enhanced_text)
+                        and not details.get("low_quality_gate")
+                    ):
+                        TEXT_EXTRACTOR._ocr_statistics[
+                            "value_result_conflict_count"
+                        ] += 1
+                        logging.info(
+                            "VALUE_RESULT_CONFLICT: page=%s, reason=header_format_outlier",
+                            record["page_index"] + 1,
+                        )
+
+                if not primary_text and not (enhanced_text or ""):
+                    document = open_documents.get(record["pdf_path"])
+                    if document is None:
+                        document = fitz.open(record["pdf_path"])
+                        open_documents[record["pdf_path"]] = document
+                    page = document[record["page_index"]]
+                    if TEXT_EXTRACTOR._value_region_has_character_ink(page, rect):
+                        min384 = TEXT_EXTRACTOR._ocr_value_detect(
+                            page,
+                            rect,
+                            limit_side_len=OCR_VALUE_RETRY_LIMIT_SIDE_LEN,
+                        )
+                        large_text = TEXT_EXTRACTOR._recognized_region_text(min384)
+                        if not large_text:
+                            min736 = TEXT_EXTRACTOR._ocr_value_detect(
+                                page,
+                                rect,
+                                limit_side_len=OCR_VALUE_FINAL_RETRY_LIMIT_SIDE_LEN,
+                            )
+                            large_text = TEXT_EXTRACTOR._recognized_region_text(min736)
+                        selected_text, large_reason = (
+                            TEXT_EXTRACTOR.select_reinforced_value(
+                                primary_text, large_text, reference_format
+                            )
+                        )
+                        if selected_text:
+                            selection_reason = "LARGE_DETECT_FORMAT_MATCH_SELECT"
+                            TEXT_EXTRACTOR._ocr_statistics[
+                                "value_large_detect_selected_count"
+                            ] += 1
+                        else:
+                            selection_reason = large_reason
+
+                if selected_text != primary_text:
+                    if selection_reason != "LARGE_DETECT_FORMAT_MATCH_SELECT":
+                        TEXT_EXTRACTOR._ocr_statistics[
+                            "value_enhancement_selected_count"
+                        ] += 1
+                else:
+                    TEXT_EXTRACTOR._ocr_statistics[
+                        "value_primary_selected_count"
+                    ] += 1
+                details["selection_reason"] = selection_reason
+                details.pop("page_detected", None)
+                record["values"][header] = selected_text
+    finally:
+        for pdf_path, document in open_documents.items():
+            document.close()
+            TEXT_EXTRACTOR.release_pdf_cache(pdf_path)
+
 def _collect_pdf_rows(
     pdf_paths,
     headers,
@@ -2564,6 +3153,7 @@ def _collect_pdf_rows(
     sheet_name="",
 ):
     rows = []
+    records = []
     summary = processing_summary if processing_summary is not None else {}
     summary.setdefault("processed_pages", 0)
     summary.setdefault("empty_pages", [])
@@ -2578,25 +3168,25 @@ def _collect_pdf_rows(
             with fitz.open(pdf_path) as document:
                 for item_mapping in mapping.values():
                     TEXT_EXTRACTOR.reset_mapping_tracking(item_mapping)
-                pdf_has_text = False
                 for page_index, page in enumerate(document):
                     TEXT_EXTRACTOR.last_preprocess_result = None
                     if cancellation is not None and cancellation.should_cancel():
                         break
+                    work_type = "unknown"
                     if progress is not None and overall_state is not None:
                         try:
-                            has_native_text = bool(
-                                page.get_text("text").strip()
-                            )
+                            has_native_text = bool(page.get_text("text").strip())
                         except Exception:
                             has_native_text = False
                         work_type = (
-                            "ocr" if force_ocr or int(page.rotation) % 360 or not has_native_text else
-                            "native_text"
+                            "ocr"
+                            if force_ocr or int(page.rotation) % 360 or not has_native_text
+                            else "native_text"
                         )
                         activity = (
-                            "PDF 텍스트 추출 중" if work_type == "native_text" else
-                            "OCR로 텍스트 추출 중"
+                            "PDF 텍스트 추출 중"
+                            if work_type == "native_text"
+                            else "OCR로 텍스트 추출 중"
                         )
                         overall_state["current"] += 1
                         progress.begin_unit(
@@ -2610,87 +3200,140 @@ def _collect_pdf_rows(
                             ocr_weight=1 + len(mapping),
                             sheet_name=sheet_name,
                         )
+                    page_ocr_start = TEXT_EXTRACTOR.ocr_statistics()[
+                        "total_ocr_inference_count"
+                    ]
                     values = {}
-                    page_has_text = False
+                    details_by_header = {}
                     for header in headers:
                         if not header:
                             continue
-                        text = (
-                            TEXT_EXTRACTOR.extract_text(
+                        if header in mapping:
+                            text_value, value_details = TEXT_EXTRACTOR.extract_text(
                                 page,
                                 mapping[header],
-                                force_ocr=force_ocr or bool(int(page.rotation) % 360),
+                                force_ocr=(
+                                    force_ocr or bool(int(page.rotation) % 360)
+                                ),
+                                return_details=True,
                             )
-                            if header in mapping else ""
-                        )
-                        values[header] = text
-                        if text:
-                            page_has_text = True
-                            pdf_has_text = True
+                        else:
+                            text_value = ""
+                            value_details = {
+                                "mode": "empty",
+                                "primary_text": "",
+                                "enhanced_text": None,
+                                "low_quality_gate": False,
+                                "rect": (0, 0, 0, 0),
+                            }
+                        values[header] = text_value
+                        details_by_header[header] = value_details
+                    records.append({
+                        "pdf_path": os.path.abspath(pdf_path),
+                        "filename": filename,
+                        "page_index": page_index,
+                        "values": values,
+                        "details": details_by_header,
+                    })
                     preprocess_result = TEXT_EXTRACTOR.last_preprocess_result
                     if preprocess_result is not None:
                         if preprocess_result.orientation_applied:
-                            summary["orientation_pages"].append(
-                                {
-                                    "file": filename,
-                                    "page": page_index + 1,
-                                    "detected": preprocess_result.detected_orientation,
-                                    "correction": preprocess_result.orientation_correction,
-                                    "confidence": round(preprocess_result.orientation_confidence, 4),
-                                    "margin": round(preprocess_result.orientation_margin, 4),
-                                }
-                            )
+                            summary["orientation_pages"].append({
+                                "file": filename,
+                                "page": page_index + 1,
+                                "detected": preprocess_result.detected_orientation,
+                                "correction": preprocess_result.orientation_correction,
+                                "confidence": round(preprocess_result.orientation_confidence, 4),
+                                "margin": round(preprocess_result.orientation_margin, 4),
+                            })
                         if preprocess_result.deskew_applied:
-                            summary["deskew_pages"].append(
-                                {
-                                    "file": filename,
-                                    "page": page_index + 1,
-                                    "angle": round(preprocess_result.skew_angle, 4),
-                                    "confidence": round(preprocess_result.skew_confidence, 4),
-                                    "line_count": preprocess_result.valid_line_count,
-                                    "angle_dispersion": round(preprocess_result.angle_dispersion, 4),
-                                }
-                            )
+                            summary["deskew_pages"].append({
+                                "file": filename,
+                                "page": page_index + 1,
+                                "angle": round(preprocess_result.skew_angle, 4),
+                                "confidence": round(preprocess_result.skew_confidence, 4),
+                                "line_count": preprocess_result.valid_line_count,
+                                "angle_dispersion": round(preprocess_result.angle_dispersion, 4),
+                            })
                         if preprocess_result.status == "rejected":
-                            summary["preprocess_rejected_pages"].append(
-                                {
-                                    "file": filename,
-                                    "page": page_index + 1,
-                                    "reason": preprocess_result.failure_reason,
-                                }
-                            )
-                    if page_has_text:
-                        rows.append(values)
-                        summary["processed_pages"] += 1
-                    else:
-                        empty_page = {
-                            "file": filename,
-                            "page": page_index + 1,
-                        }
-                        summary["empty_pages"].append(empty_page)
-                        if TEXT_EXTRACTOR.ocr_unavailable_reason:
-                            summary["ocr_unavailable_pages"].append(
-                                {
-                                    **empty_page,
-                                    "reason": TEXT_EXTRACTOR.ocr_unavailable_reason,
-                                }
-                            )
-                        logging.warning(
-                            "[%s] %s페이지에서 텍스트가 추출되지 않았습니다.",
-                            filename,
-                            page_index + 1,
-                        )
+                            summary["preprocess_rejected_pages"].append({
+                                "file": filename,
+                                "page": page_index + 1,
+                                "reason": preprocess_result.failure_reason,
+                            })
                     if progress is not None and overall_state is not None:
-                        progress.complete_unit(overall_state["current"], work_type=work_type, ocr_weight=1 + len(mapping), ocr_initialization_seconds=getattr(TEXT_EXTRACTOR, "last_ocr_initialization_seconds", 0.0))
+                        page_ocr_count = (
+                            TEXT_EXTRACTOR.ocr_statistics()["total_ocr_inference_count"]
+                            - page_ocr_start
+                        )
+                        progress.complete_unit(
+                            overall_state["current"],
+                            work_type=work_type,
+                            ocr_weight=max(page_ocr_count, 1),
+                            ocr_initialization_seconds=getattr(
+                                TEXT_EXTRACTOR,
+                                "last_ocr_initialization_seconds",
+                                0.0,
+                            ),
+                        )
                         TEXT_EXTRACTOR.last_ocr_initialization_seconds = 0.0
-                if not pdf_has_text and filename not in failed_files:
-                    failed_files.append(filename)
         except Exception as error:
             logging.error("PDF 파일 로드 및 파싱 실패: %s, 사유: %s", filename, error)
             if filename not in failed_files:
                 failed_files.append(filename)
         finally:
             TEXT_EXTRACTOR.release_pdf_cache(pdf_path)
+
+    references = _resolve_header_reference_formats(records, headers)
+    reinforcement_ocr_start = TEXT_EXTRACTOR.ocr_statistics()[
+        "total_ocr_inference_count"
+    ]
+    reinforcement_started_at = time.monotonic()
+    _apply_value_reinforcement(
+        records, headers, references, cancellation=cancellation
+    )
+    reinforcement_duration = time.monotonic() - reinforcement_started_at
+    reinforcement_ocr_count = (
+        TEXT_EXTRACTOR.ocr_statistics()["total_ocr_inference_count"]
+        - reinforcement_ocr_start
+    )
+    if (
+        reinforcement_ocr_count
+        and progress is not None
+        and hasattr(progress, "observe_ocr_work")
+    ):
+        progress.observe_ocr_work(
+            reinforcement_ocr_count, reinforcement_duration
+        )
+
+    files_with_text = set()
+    for record in records:
+        page_has_text = any(record["values"].get(header, "") for header in headers if header)
+        if page_has_text:
+            rows.append(record["values"])
+            files_with_text.add(record["filename"])
+            summary["processed_pages"] += 1
+        else:
+            empty_page = {
+                "file": record["filename"],
+                "page": record["page_index"] + 1,
+            }
+            summary["empty_pages"].append(empty_page)
+            if TEXT_EXTRACTOR.ocr_unavailable_reason:
+                summary["ocr_unavailable_pages"].append({
+                    **empty_page,
+                    "reason": TEXT_EXTRACTOR.ocr_unavailable_reason,
+                })
+            logging.warning(
+                "[%s] %s페이지에서 텍스트가 추출되지 않았습니다.",
+                record["filename"],
+                record["page_index"] + 1,
+            )
+    for pdf_path in pdf_paths:
+        filename = os.path.basename(pdf_path)
+        if filename not in files_with_text and filename not in failed_files:
+            failed_files.append(filename)
+    summary["ocr_statistics"] = TEXT_EXTRACTOR.ocr_statistics()
     return rows
 
 
@@ -2706,6 +3349,19 @@ def _processing_summary_text(summary, failed_files):
             f"{len(summary.get('ocr_unavailable_pages', []))}페이지"
         ),
     ]
+    ocr_stats = summary.get("ocr_statistics", {})
+    if ocr_stats:
+        lines.extend((
+            f"전체 페이지 OCR: {ocr_stats.get('page_ocr_inference_count', 0)}회",
+            f"기본 값 OCR: {ocr_stats.get('value_primary_ocr_count', 0)}회",
+            f"저대비·흐림 보강: {ocr_stats.get('value_low_quality_retry_count', 0)}회",
+            f"형식 이상치 보강: {ocr_stats.get('value_format_outlier_retry_count', 0)}회",
+            f"min384 재시도: {ocr_stats.get('value_min384_retry_count', 0)}회",
+            f"min736 재시도: {ocr_stats.get('value_min736_retry_count', 0)}회",
+            f"보강 결과 선택: {ocr_stats.get('value_enhancement_selected_count', 0)}건",
+            f"큰 검출 결과 선택: {ocr_stats.get('value_large_detect_selected_count', 0)}건",
+            f"총 OCR 추론: {ocr_stats.get('total_ocr_inference_count', 0)}회",
+        ))
     if failed_files:
         lines.append(f"제외 파일: {len(failed_files)}개")
     orientation_pages = summary.get("orientation_pages", [])
@@ -3023,3 +3679,4 @@ def run_application(parent_root, force_ocr=False):
                     workbook.close()
                 except Exception as close_error:
                     logging.warning("PDF 취합 워크북 닫기 실패: %s", close_error)
+        TEXT_EXTRACTOR.reset_work_cache()

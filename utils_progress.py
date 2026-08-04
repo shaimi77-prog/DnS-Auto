@@ -185,6 +185,14 @@ class ProcessingProgressDialog:
         self._refresh_time()
         self._refresh_events()
 
+    def observe_ocr_work(self, ocr_weight, duration_seconds):
+        self.estimator.observe(
+            work_type="ocr",
+            weight=ocr_weight,
+            duration_seconds=duration_seconds,
+        )
+        self._refresh_time()
+        self._refresh_events()
     def close(self):
         if getattr(self.parent, "_dns_active_progress", None) is self:
             delattr(self.parent, "_dns_active_progress")

@@ -1,4 +1,4 @@
-﻿# DnS Auto v1.0.0
+# DnS Auto v1.0.0
 
 DnS Auto는 Windows에서 PDF·Excel 자료를 기준 양식으로 취합하고 DOCX·HWP·XLS 문서를 변환하는 로컬 데스크톱 도구입니다. PDF 내장 텍스트와 로컬 ONNX OCR을 함께 사용하며 문서 내용을 외부 서버로 전송하지 않습니다.
 
@@ -7,6 +7,8 @@ DnS Auto는 Windows에서 PDF·Excel 자료를 기준 양식으로 취합하고 
 ## 주요 기능
 
 - PDF 영역 지정, 기준 단어 추적, 네이티브 텍스트·한국어 OCR 취합
+- 이미지 PDF 값 영역의 210 DPI/min224 기본 OCR과 저대비·흐림·헤더 형식 이상치 조건부 보강
+- 150 DPI 기준 단어 5단계 검색 실패 시 최대 탐색 영역의 210 DPI 단일 재시도
 - Excel 다중 시트 누적 취합과 기준 열 교차매핑
 - DOC/DOCX·HWP/HWPX의 PDF 변환 및 XLS의 XLSX 자동변환
 - GUI와 MCP가 공유하는 프로필·서비스·작업 유형별 예상시간 추정기

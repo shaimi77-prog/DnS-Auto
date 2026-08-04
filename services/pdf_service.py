@@ -127,6 +127,19 @@ def merge_pdfs(
                         activity=work_type, **metadata
                     ))
 
+            def observe_ocr_work(self, ocr_weight, duration_seconds):
+                estimator.observe(
+                    work_type="ocr",
+                    weight=ocr_weight,
+                    duration_seconds=duration_seconds,
+                )
+                if report:
+                    report(ProgressEvent(
+                        overall["current"], total_pages,
+                        "OCR reinforcement completed",
+                        self.current_file, current_sheet=self.current_sheet,
+                        activity="ocr", **estimator.metadata()
+                    ))
         any_data = False
         for mapping_set in mapping_sets:
             sheets = mapping_set.get("sheets")

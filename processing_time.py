@@ -16,6 +16,14 @@ class ProcessingTimeEstimator:
             self.samples[kind].append(duration/weight); self.samples[kind]=self.samples[kind][-8:]
         self.completed += 1
         if self.completed <= len(self.planned_work): self.planned_work[self.completed-1]=(kind,weight)
+    def observe(self, *, work_type="ocr", weight=1, duration_seconds=0):
+        """Learn from extra work without marking another page completed."""
+        kind = work_type
+        weight = max(float(weight), 1.0)
+        duration = max(float(duration_seconds), 0.0)
+        if kind in self.samples:
+            self.samples[kind].append(duration / weight)
+            self.samples[kind] = self.samples[kind][-8:]
     def _average(self, kind):
         values=self.samples[kind]
         if len(values)<self.minimum_samples: return None
