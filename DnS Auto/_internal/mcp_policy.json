@@ -1,0 +1,4 @@
+{
+  "allowed_input_roots": ["inputs", "profiles"],
+  "output_root": "outputs"
+}
