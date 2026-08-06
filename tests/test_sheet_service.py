@@ -112,6 +112,29 @@ class SheetServiceTests(unittest.TestCase):
             )
             self.assertIn("Data", [event.current_sheet for event in events])
 
+    def test_progress_uses_file_samples_without_counting_sheet_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template, source = _books(root)
+            source2 = root / "source2.xlsx"
+            source2.write_bytes(source.read_bytes())
+            events = []
+            result = merge_workbooks(
+                str(template),
+                [str(source), str(source2)],
+                None,
+                str(root / "outputs"),
+                events.append,
+                settings={
+                    "Data": {"S": 1, "E": 1, "mode": 1, "key_col": "", "protect": True}
+                },
+            )
+            sheet_events = [event for event in events if event.current_sheet == "Data"]
+            self.assertEqual([event.completed for event in sheet_events], [0, 1])
+            first_complete = next(event for event in events if event.completed == 1 and not event.current_sheet)
+            self.assertEqual(first_complete.estimate_status, "available")
+            self.assertIn("xlsx_merge", result.details["timing"]["sample_counts"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,48 +1,63 @@
 $ErrorActionPreference = "Stop"
 $sourceRoot = $PSScriptRoot
 $projectRoot = Split-Path -Parent $sourceRoot
-$python = if ($env:DNS_AUTO_BUILD_PYTHON) {
-    $env:DNS_AUTO_BUILD_PYTHON
-} else {
-    Join-Path $sourceRoot ".venv_build311\Scripts\python.exe"
-}
+$python = Join-Path $sourceRoot ".venv_build311\Scripts\python.exe"
 $buildRoot = Join-Path $sourceRoot ".build"
-$stagingRoot = Join-Path $buildRoot "portable-dist"
+$mcpDistRoot = Join-Path $buildRoot "mcp-dist"
 $guiDistRoot = Join-Path $buildRoot "gui-dist"
+$stagingRoot = Join-Path $buildRoot "portable-dist"
 $bundleRoot = Join-Path $stagingRoot "DnS Auto"
-$releaseRoot = Join-Path $projectRoot "release"
-$releaseBundle = Join-Path $releaseRoot "DnS Auto"
-$archive = Join-Path $releaseRoot "DnS_Auto_Portable.zip"
+$portableBundle = Join-Path $sourceRoot "DnS Auto"
 
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw "빌드 Python을 찾을 수 없습니다. 먼저 setup_build_environment.ps1을 실행하세요: $python"
 }
-New-Item -ItemType Directory -Force -Path $buildRoot, $releaseRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
 
-& $python -m PyInstaller --noconfirm --clean --distpath $stagingRoot --workpath (Join-Path $buildRoot "mcp-work") (Join-Path $sourceRoot "DnS_Auto_MCP.spec")
+foreach ($path in @($mcpDistRoot, $guiDistRoot, $stagingRoot)) {
+    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+}
+
+function Merge-Directory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    foreach ($item in Get-ChildItem -LiteralPath $Source -Force) {
+        $target = Join-Path $Destination $item.Name
+        if ($item.PSIsContainer) {
+            Merge-Directory -Source $item.FullName -Destination $target
+        } else {
+            Copy-Item -LiteralPath $item.FullName -Destination $target -Force
+        }
+    }
+}
+
+& $python -m PyInstaller --noconfirm --clean --distpath $mcpDistRoot --workpath (Join-Path $buildRoot "mcp-work") (Join-Path $sourceRoot "DnS_Auto_MCP.spec")
 if ($LASTEXITCODE -ne 0) { throw "MCP PyInstaller 빌드 실패 (종료 코드: $LASTEXITCODE)" }
 
 & $python -m PyInstaller --noconfirm --clean --distpath $guiDistRoot --workpath (Join-Path $buildRoot "gui-work") (Join-Path $sourceRoot "DnS_Auto.spec")
 if ($LASTEXITCODE -ne 0) { throw "GUI PyInstaller 빌드 실패 (종료 코드: $LASTEXITCODE)" }
-Copy-Item -LiteralPath (Join-Path $guiDistRoot "DnS Auto.exe") -Destination $bundleRoot -Force
+$mcpBundle = Join-Path $mcpDistRoot "DnS Auto"
+$guiBundle = Join-Path $guiDistRoot "DnS Auto"
+if (-not (Test-Path -LiteralPath $mcpBundle -PathType Container)) { throw "MCP one-dir 산출 폴더가 없습니다: $mcpBundle" }
+if (-not (Test-Path -LiteralPath $guiBundle -PathType Container)) { throw "GUI one-dir 산출 폴더가 없습니다: $guiBundle" }
+Merge-Directory -Source $mcpBundle -Destination $bundleRoot
+Merge-Directory -Source $guiBundle -Destination $bundleRoot
 
 Copy-Item -LiteralPath (Join-Path $sourceRoot "mcp_policy.json") -Destination $bundleRoot -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $bundleRoot "inputs"), (Join-Path $bundleRoot "outputs"), (Join-Path $bundleRoot "profiles\sheet"), (Join-Path $bundleRoot "profiles\pdf") | Out-Null
 Copy-Item -LiteralPath (Join-Path $sourceRoot "PORTABLE_README.txt") -Destination (Join-Path $bundleRoot "QUICK_START.txt") -Force
 foreach ($name in @("USER_GUIDE.html", "GUI_GUIDE.html", "GUI_QUICK_START.html", "MCP_GUIDE.html", "CODEX_MCP_CONFIG.example.json", "CODEX_MCP_CONFIG.example.toml")) {
-    $sourcePath = if ($name.EndsWith(".html")) {
-        Join-Path (Join-Path $sourceRoot "docs") $name
-    } else {
-        Join-Path $sourceRoot $name
-    }
-    Copy-Item -LiteralPath $sourcePath -Destination $bundleRoot -Force
+    Copy-Item -LiteralPath (Join-Path $sourceRoot $name) -Destination $bundleRoot -Force
 }
 Copy-Item -LiteralPath (Join-Path $sourceRoot "assets") -Destination $bundleRoot -Recurse -Force
 
-# 완성된 staging만 release에 반영합니다.
-if (Test-Path -LiteralPath $releaseBundle) { Remove-Item -LiteralPath $releaseBundle -Recurse -Force }
-Copy-Item -LiteralPath $bundleRoot -Destination $releaseRoot -Recurse -Force
-if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
-Compress-Archive -LiteralPath $releaseBundle -DestinationPath $archive -CompressionLevel Optimal
-Write-Host "통합 포터블 빌드 완료: $releaseBundle"
-Write-Host "압축 파일: $archive"
+# 병합된 staging의 복제본에서 GUI와 MCP를 검증한 뒤에만 기존 포터블을 교체합니다.
+& $python -B (Join-Path $sourceRoot "tests\portable_bundle_smoke.py") --bundle $bundleRoot
+if ($LASTEXITCODE -ne 0) { throw "통합 포터블 스모크 테스트 실패 (종료 코드: $LASTEXITCODE)" }
+
+if (Test-Path -LiteralPath $portableBundle) { Remove-Item -LiteralPath $portableBundle -Recurse -Force }
+Copy-Item -LiteralPath $bundleRoot -Destination $sourceRoot -Recurse -Force
+Write-Host "통합 포터블 빌드 및 검증 완료: $portableBundle"

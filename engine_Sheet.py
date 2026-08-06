@@ -1,4 +1,4 @@
-"""여러 Excel 파일의 시트 데이터를 기준 양식으로 취합하는 기능."""
+﻿"""여러 Excel 파일의 시트 데이터를 기준 양식으로 취합하는 기능."""
 
 import datetime
 import logging
@@ -859,16 +859,7 @@ def run_application(parent_root):
         )
 
         def report(event):
-            if event.completed < event.total:
-                progress.begin_unit(
-                    os.path.basename(event.current_file or ""),
-                    event.completed + 1,
-                    event.message,
-                    work_type="native_text",
-                    sheet_name=event.current_sheet or "",
-                )
-            else:
-                progress.complete_unit(event.completed)
+            progress.update_from_event(event)
 
         result = merge_workbooks(
             template_path,

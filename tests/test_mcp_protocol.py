@@ -49,7 +49,7 @@ class McpProtocolTests(unittest.TestCase):
 
     def test_hwp_job_lifecycle_returns_explicit_user_action(self):
         """The MCP job API must remain observable even when HWP automation is disabled."""
-        samples = sorted((Path(os.environ.get("DNS_AUTO_EMPIRICAL_ROOT", ROOT / "private_test_files"))).rglob("*.hwpx"))
+        samples = sorted((ROOT.parent / "실증시험_20260727").rglob("*.hwpx"))
         if not samples:
             self.skipTest("Legacy empirical HWPX fixture is not present in this project copy.")
 
@@ -86,7 +86,7 @@ class McpProtocolTests(unittest.TestCase):
         "Requires an interactive Windows desktop session with Microsoft Excel COM.",
     )
     def test_xls_conversion_job_creates_xlsx_output(self):
-        samples = sorted((Path(os.environ.get("DNS_AUTO_EMPIRICAL_ROOT", ROOT / "private_test_files"))).rglob("*.xls"))
+        samples = sorted((ROOT.parent / "실증시험_20260727").rglob("*.xls"))
         self.assertTrue(samples, "An empirical XLS sample is required for this integration test.")
 
         started = self.request({
@@ -118,7 +118,7 @@ class McpProtocolTests(unittest.TestCase):
         self.assertGreater(Path(outputs[0]).stat().st_size, 0)
 
     def test_pdf_merge_job_creates_workbook_from_empirical_files(self):
-        empirical = Path(os.environ.get("DNS_AUTO_EMPIRICAL_ROOT", ROOT / "private_test_files"))
+        empirical = ROOT.parent / "실증시험_20260727"
         template = next(empirical.rglob("*.xlsx"), None)
         if template is None:
             self.skipTest("Legacy empirical PDF fixture is not present in this project copy.")

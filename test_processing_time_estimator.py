@@ -76,6 +76,36 @@ class ProcessingTimeEstimatorTests(unittest.TestCase):
         self.assertEqual(event.activity, "ocr")
         self.assertEqual(event.estimated_remaining_seconds, 130)
 
+    def test_arbitrary_types_are_isolated_and_available_after_one_sample(self):
+        clock = Clock()
+        estimator = ProcessingTimeEstimator(
+            [("docx_to_pdf", 1), ("xls_to_xlsx", 1), ("docx_to_pdf", 1)],
+            clock=clock,
+            minimum_samples=1,
+        )
+        estimator.begin("docx_to_pdf")
+        clock.advance(3)
+        estimator.complete()
+        self.assertEqual(estimator.metadata()["estimate_status"], "calculating")
+        estimator.begin("xls_to_xlsx")
+        clock.advance(7)
+        estimator.complete()
+        self.assertEqual(estimator.metadata()["estimated_remaining_seconds"], 3)
+
+    def test_failed_unit_advances_without_becoming_a_sample(self):
+        clock = Clock()
+        estimator = ProcessingTimeEstimator(
+            [("xlsx_merge", 1), ("xlsx_merge", 1)],
+            clock=clock,
+            minimum_samples=1,
+        )
+        estimator.begin("xlsx_merge")
+        clock.advance(50)
+        estimator.complete(successful=False)
+        self.assertEqual(estimator.completed, 1)
+        self.assertEqual(estimator.summary()["sample_counts"], {})
+        self.assertEqual(estimator.metadata()["estimate_status"], "calculating")
+
 
 if __name__ == "__main__":
     unittest.main()

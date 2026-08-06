@@ -116,6 +116,9 @@ class ProcessingProgressDialog:
 
     def _refresh_time(self):
         metadata = self.estimator.metadata()
+        self._set_time_metadata(metadata)
+
+    def _set_time_metadata(self, metadata):
         remaining = metadata["estimated_remaining_seconds"]
         remaining_text = (
             f"약 {self._format_seconds(remaining)}"
@@ -126,6 +129,27 @@ class ProcessingProgressDialog:
             f"경과 {self._format_seconds(metadata['elapsed_seconds'])} | "
             f"예상 잔여 {remaining_text}"
         )
+
+    def update_from_event(self, event):
+        """서비스가 계산한 진행률과 ETA를 수정 없이 표시한다."""
+        if self._closed:
+            return
+        self.completed_units = min(max(int(event.completed), 0), self.total_units)
+        self.bar["value"] = self.completed_units
+        self.sheet_var.set(
+            f"현재 시트: {event.current_sheet}" if event.current_sheet else ""
+        )
+        self.file_var.set(
+            f"현재 파일: {event.current_file}" if event.current_file else event.message
+        )
+        self.detail_var.set(event.message)
+        self._set_time_metadata(
+            {
+                "elapsed_seconds": event.elapsed_seconds,
+                "estimated_remaining_seconds": event.estimated_remaining_seconds,
+            }
+        )
+        self._refresh_events()
 
     def _refresh_events(self):
         if self._closed:

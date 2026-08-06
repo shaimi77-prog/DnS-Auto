@@ -33,6 +33,8 @@ class McpCancellationTests(unittest.TestCase):
             result = pdf_service.merge_pdfs(str(template), {"Data": [str(pdf)]}, str(profile), str(root / "outputs"), cancellation=cancellation)
             self.assertEqual(result.state, JobState.CANCELLED)
             self.assertEqual(list((root / "outputs").glob("*.xlsx")), [])
+            self.assertEqual(pdf_service.drag_engine.TEXT_EXTRACTOR._ocr_cache, {})
+            self.assertEqual(pdf_service.drag_engine.TEXT_EXTRACTOR.ocr_statistics()["total_ocr_inference_count"], 0)
 
     def test_uncancellable_job_rejects_request(self):
         manager = JobManager(); job_id = manager.start(lambda report: JobResult(JobState.SUCCEEDED)); deadline = time.monotonic() + 1

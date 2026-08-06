@@ -1,4 +1,4 @@
-"""Smoke test for the shared PDF/Excel processing progress dialog."""
+﻿"""Smoke test for the shared PDF/Excel processing progress dialog."""
 
 import json
 import tkinter as tk

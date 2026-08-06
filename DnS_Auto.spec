@@ -12,6 +12,10 @@ a = Analysis(
     binaries=[],
     datas=[('ocr_models', 'ocr_models')] + rapidocr_datas,
     hiddenimports=[
+        'engine_Drag',
+        'engine_Sheet',
+        'ui_mcp_bridge',
+        'utils_converter',
         'rapidocr',
         'rapidocr.main',
         'rapidocr.inference_engine.onnxruntime',
@@ -32,9 +36,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='DnS Auto',
     version='version_info.txt',
     debug=False,
@@ -49,4 +52,14 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='DnS Auto',
 )

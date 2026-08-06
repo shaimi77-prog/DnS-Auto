@@ -1,4 +1,4 @@
-"""스캔 PDF 기준 선정, OCR 앵커 및 회전 제외 로직의 회귀시험."""
+"""스캔 PDF 기준 선정, OCR 앵커 및 회전 처리 로직의 회귀시험."""
 # Copyright (C) 2026 두부코드(DOOBOO_CODE)
 # SPDX-License-Identifier: AGPL-3.0-only
 
@@ -11,7 +11,7 @@ import fitz
 
 from engine_Drag import (
     OCR_MATCH,
-    ROTATED_PAGE_EXCLUDED,
+    TEXT_EXTRACTOR,
     HybridTextExtractor,
     _collect_pdf_rows,
     select_reference_page,
@@ -21,6 +21,7 @@ from engine_Drag import (
 class FakeOCR:
     def __init__(self):
         self.calls = []
+        self.text_det = SimpleNamespace(limit_type="min", limit_side_len=736)
 
     def __call__(self, _image, use_det=None, **_kwargs):
         self.calls.append(bool(use_det))
@@ -41,7 +42,7 @@ class FailingOCR:
         raise RuntimeError("시험용 OCR 실행 실패")
 
 
-def create_native_pdf(path):
+def create_native_pdf(path, rotation=0):
     document = fitz.open()
     page = document.new_page(width=595, height=842)
     for index in range(5):
@@ -50,6 +51,8 @@ def create_native_pdf(path):
             f"REFERENCE TEXT BLOCK {index} WITH ENOUGH CHARACTERS",
             fontsize=12,
         )
+    if rotation:
+        page.set_rotation(rotation)
     document.save(path)
     document.close()
 
@@ -74,7 +77,7 @@ def main():
         rotated = root / "03_rotated.pdf"
         create_scanned_pdf(scanned)
         create_native_pdf(native)
-        create_scanned_pdf(rotated, rotation=90)
+        create_native_pdf(rotated, rotation=90)
 
         reference = select_reference_page([str(scanned), str(native)])
         checks["native_reference_preferred"] = (
@@ -194,30 +197,57 @@ def main():
                 checks["value_detection_fallback"] = (
                     "여러 줄 값" in value
                     and False not in fake_ocr.calls
-                    and fake_ocr.calls.count(True) == 2
+                    and fake_ocr.calls.count(True) == 3
                 )
 
             failed_files = []
             summary = {}
-            rotated_rows = _collect_pdf_rows(
-                [str(rotated)],
-                ["항목"],
-                {
-                    "항목": {
-                        "rect": fitz.Rect(0, 0, 300, 160),
-                        "keyword": "",
-                        "anchor_rect": None,
-                    }
-                },
-                True,
-                failed_files,
-                summary,
+            rotation_ocr = FakeOCR()
+            shared_original_ocr = TEXT_EXTRACTOR.ocr
+            shared_original_reason = TEXT_EXTRACTOR.ocr_unavailable_reason
+            shared_original_logged = TEXT_EXTRACTOR._ocr_unavailable_logged
+            shared_original_disabled = TEXT_EXTRACTOR._ocr_disabled_for_work
+            TEXT_EXTRACTOR.ocr = rotation_ocr
+            TEXT_EXTRACTOR.ocr_unavailable_reason = None
+            TEXT_EXTRACTOR.reset_work_cache()
+            try:
+                rotated_rows = _collect_pdf_rows(
+                    [str(rotated)],
+                    ["항목"],
+                    {
+                        "항목": {
+                            "rect": fitz.Rect(0, 0, 300, 160),
+                            "keyword": "",
+                            "anchor_rect": None,
+                        }
+                    },
+                    False,
+                    failed_files,
+                    summary,
+                )
+            finally:
+                TEXT_EXTRACTOR.ocr = shared_original_ocr
+                TEXT_EXTRACTOR.ocr_unavailable_reason = shared_original_reason
+                TEXT_EXTRACTOR._ocr_unavailable_logged = shared_original_logged
+                TEXT_EXTRACTOR._ocr_disabled_for_work = shared_original_disabled
+                TEXT_EXTRACTOR.reset_work_cache()
+            orientation_metadata_valid = all(
+                item.get("correction") in (90, 180, 270)
+                and item.get("detected") in (90, 180, 270)
+                and 0 <= item.get("confidence", -1) <= 1
+                for item in summary["orientation_pages"]
             )
-            checks["rotated_page_excluded"] = (
-                not rotated_rows
-                and len(summary["rotated_pages"]) == 1
-                and summary["rotated_pages"][0]["reason"]
-                == ROTATED_PAGE_EXCLUDED
+            rejection_metadata_valid = all(
+                bool(item.get("reason"))
+                for item in summary["preprocess_rejected_pages"]
+            )
+            checks["rotated_page_processed_with_ocr"] = (
+                bool(rotated_rows)
+                and summary["processed_pages"] == 1
+                and summary["rotated_pages"] == []
+                and bool(rotation_ocr.calls)
+                and orientation_metadata_valid
+                and rejection_metadata_valid
             )
             details["summary"] = summary
             extractor.ocr = FailingOCR()

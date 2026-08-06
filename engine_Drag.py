@@ -67,11 +67,49 @@ OCR_VALUE_FINAL_RETRY_LIMIT_SIDE_LEN = 736
 OCR_CANDIDATE_MERGE_DISTANCE_PT = 5.0
 OCR_CANDIDATE_IOU_THRESHOLD = 0.6
 
+PDF_MODE_FAST = "fast"
+PDF_MODE_STANDARD = "standard"
+PDF_MODE_CAREFUL = "careful"
+PDF_COLLECTION_MODES = (PDF_MODE_FAST, PDF_MODE_STANDARD, PDF_MODE_CAREFUL)
+PDF_OCR_MODE_SETTINGS = {
+    PDF_MODE_STANDARD: {
+        "value_dpi": OCR_VALUE_RECOGNITION_DPI,
+        "value_det_limit_side_len": OCR_VALUE_DET_LIMIT_SIDE_LEN,
+    },
+    PDF_MODE_CAREFUL: {
+        "value_dpi": 240,
+        "value_det_limit_side_len": 256,
+    },
+}
+
 NATIVE_MATCH = "NATIVE_MATCH"
 OCR_MATCH = "OCR_MATCH"
 OCR_NO_MATCH = "OCR_NO_MATCH"
 OCR_UNAVAILABLE = "OCR_UNAVAILABLE"
 ROTATED_PAGE_EXCLUDED = "ROTATED_PAGE_EXCLUDED"
+ROTATED_PAGE_REQUIRES_OCR = "ROTATED_PAGE_REQUIRES_OCR"
+
+
+def validate_pdf_collection_mode(value, *, fallback=False):
+    """Validate one execution policy without silently changing MCP input."""
+    mode = value or PDF_MODE_STANDARD
+    if mode in PDF_COLLECTION_MODES:
+        return mode
+    if fallback:
+        logging.error(
+            "PDF_COLLECTION_MODE_INVALID: value=%r, fallback=%s",
+            value,
+            PDF_MODE_STANDARD,
+        )
+        return PDF_MODE_STANDARD
+    raise ValueError(
+        "pdf_collection_mode은 fast, standard, careful 중 하나여야 합니다."
+    )
+
+
+def pdf_mode_settings(mode):
+    mode = validate_pdf_collection_mode(mode)
+    return PDF_OCR_MODE_SETTINGS.get(mode, PDF_OCR_MODE_SETTINGS[PDF_MODE_STANDARD])
 
 
 def validate_anchor_keyword(keyword):
@@ -543,13 +581,14 @@ class HybridTextExtractor:
     def _ocr_value_detect(
         self, page, clip, *, enhance=False,
         limit_side_len=OCR_VALUE_DET_LIMIT_SIDE_LEN,
+        dpi=OCR_VALUE_RECOGNITION_DPI,
     ):
         """Run the approved value-only OCR policy without changing page OCR."""
         key = (
             self._page_identity(page),
             int(page.number),
             tuple(round(value, 2) for value in clip),
-            OCR_VALUE_RECOGNITION_DPI,
+            int(dpi),
             "value-enhanced" if enhance else "value-primary",
             int(limit_side_len),
         )
@@ -560,7 +599,7 @@ class HybridTextExtractor:
         try:
             pix = page.get_pixmap(
                 clip=clip,
-                dpi=OCR_VALUE_RECOGNITION_DPI,
+                dpi=int(dpi),
                 alpha=False,
             )
             rgb = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
@@ -803,7 +842,7 @@ class HybridTextExtractor:
         self._ocr_statistics["anchor_region_retry_match_count"] += 1
         return selected["rect"]
 
-    def find_keyword_candidates(self, page, origin_rect, keyword):
+    def find_keyword_candidates(self, page, origin_rect, keyword, *, allow_ocr=True):
         """네이티브 우선, OCR 폴백으로 5단계 거리순 후보를 반환합니다."""
         self.last_keyword_status = None
         self.last_keyword_reason = None
@@ -816,7 +855,7 @@ class HybridTextExtractor:
         )
         if candidates:
             self.last_keyword_status = NATIVE_MATCH
-        else:
+        elif allow_ocr:
             candidates = self._find_ocr_keyword_candidates(
                 page,
                 origin_rect,
@@ -826,6 +865,8 @@ class HybridTextExtractor:
                 self.last_keyword_status = OCR_MATCH
             elif self.last_keyword_status != OCR_UNAVAILABLE:
                 self.last_keyword_status = OCR_NO_MATCH
+        else:
+            self.last_keyword_status = OCR_NO_MATCH
         return sorted(
             candidates,
             key=lambda match: (
@@ -893,7 +934,7 @@ class HybridTextExtractor:
             center.y + height / 2,
         ) & page.rect
 
-    def adjusted_rect(self, page, mapping):
+    def adjusted_rect(self, page, mapping, *, allow_ocr=True):
         drag_rect = mapping["rect"]
         keyword = mapping.get("keyword")
         template_anchor = mapping.get("anchor_rect")
@@ -908,8 +949,14 @@ class HybridTextExtractor:
             return drag_rect
         tracking_anchor = mapping.get("tracking_anchor_rect") or template_anchor
         search_origin = self._tracking_search_origin(page, drag_rect, tracking_anchor)
-        candidates = self.find_keyword_candidates(page, search_origin, keyword)
-        if not candidates and self.last_keyword_status == OCR_NO_MATCH:
+        candidates = (
+            self.find_keyword_candidates(page, search_origin, keyword)
+            if allow_ocr
+            else self.find_keyword_candidates(
+                page, search_origin, keyword, allow_ocr=False
+            )
+        )
+        if allow_ocr and not candidates and self.last_keyword_status == OCR_NO_MATCH:
             retry_candidate = self._retry_ocr_keyword_candidate(
                 page, search_origin, keyword
             )
@@ -927,6 +974,15 @@ class HybridTextExtractor:
                     OCR_VALUE_RECOGNITION_DPI,
                 )
         if not candidates:
+            if not allow_ocr:
+                logging.info(
+                    "FAST_MODE_ANCHOR_UNAVAILABLE: file=%s, page=%s",
+                    os.path.basename(
+                        getattr(page.parent, "name", "") or "(memory-pdf)"
+                    ),
+                    page.number + 1,
+                )
+                return fitz.Rect()
             if preprocess_result is not None and preprocess_result.orientation_applied:
                 preprocess_result.status = "rejected"
                 preprocess_result.reference_validation = "rejected"
@@ -941,7 +997,7 @@ class HybridTextExtractor:
                     page.number + 1,
                     keyword,
                 )
-            return drag_rect
+            return fitz.Rect() if not allow_ocr else drag_rect
         if self.last_keyword_status == OCR_MATCH:
             logging.info(
                 "%s: 파일=%s, 페이지=%s, 키워드=%s",
@@ -1205,17 +1261,31 @@ class HybridTextExtractor:
         force_ocr=False,
         dpi=OCR_VALUE_RECOGNITION_DPI,
         return_details=False,
+        pdf_collection_mode=PDF_MODE_STANDARD,
     ):
+        mode = validate_pdf_collection_mode(pdf_collection_mode)
+        settings = pdf_mode_settings(mode)
         if force_ocr:
             self._ocr_page_detect(page)
-        rect = self.adjusted_rect(page, mapping)
+        rect = self.adjusted_rect(
+            page,
+            mapping,
+            allow_ocr=(force_ocr or mode != PDF_MODE_FAST),
+        )
         empty_details = {
-            "mode": "empty",
+            "mode": (
+                "anchor_unavailable"
+                if mode == PDF_MODE_FAST and mapping.get("keyword") and rect.is_empty
+                else "empty"
+            ),
             "primary_text": "",
             "enhanced_text": None,
             "low_quality_gate": False,
             "rect": tuple(rect),
             "page_detected": None,
+            "requires_ocr": mode == PDF_MODE_FAST,
+            "value_dpi": settings["value_dpi"],
+            "value_det_limit_side_len": settings["value_det_limit_side_len"],
         }
         if rect.width < 5 or rect.height < 5:
             logging.warning("추출 영역이 5pt 미만이므로 판독을 생략합니다.")
@@ -1228,15 +1298,37 @@ class HybridTextExtractor:
                         **empty_details,
                         "mode": "native",
                         "primary_text": native_text,
+                        "requires_ocr": False,
                     }
                     return (native_text, details) if return_details else native_text
             except Exception as error:
                 logging.warning(f"Native 텍스트 추출 실패, OCR로 전환합니다: {error}")
+        if mode == PDF_MODE_FAST and not force_ocr:
+            details = {
+                **empty_details,
+                "mode": (
+                    "anchor_unavailable"
+                    if mapping.get("keyword") and rect.is_empty
+                    else "unavailable_without_ocr"
+                ),
+                "requires_ocr": True,
+            }
+            return ("", details) if return_details else ""
         if not self.ensure_ocr():
             return ("", empty_details) if return_details else ""
+        if mode == PDF_MODE_CAREFUL and not force_ocr:
+            logging.info(
+                "CAREFUL_MODE_VALUE_OCR_USED: page=%s, experimental=true",
+                page.number + 1,
+            )
         try:
             page_detected = self._ocr_page_detect(page)
-            region_detected = self._ocr_value_detect(page, rect)
+            region_detected = self._ocr_value_detect(
+                page,
+                rect,
+                dpi=settings["value_dpi"],
+                limit_side_len=settings["value_det_limit_side_len"],
+            )
             primary_text = self._recognized_consensus_text(
                 page_detected,
                 region_detected,
@@ -1254,6 +1346,8 @@ class HybridTextExtractor:
                     page,
                     rect,
                     enhance=True,
+                    dpi=settings["value_dpi"],
+                    limit_side_len=settings["value_det_limit_side_len"],
                 )
                 enhanced_text = self._recognized_consensus_text(
                     page_detected,
@@ -1273,6 +1367,9 @@ class HybridTextExtractor:
                 "low_quality_gate": low_quality_gate,
                 "rect": tuple(rect),
                 "page_detected": page_detected,
+                "requires_ocr": True,
+                "value_dpi": settings["value_dpi"],
+                "value_det_limit_side_len": settings["value_det_limit_side_len"],
             }
             # Header-format selection is intentionally deferred to _collect_pdf_rows.
             return (primary_text, details) if return_details else primary_text
@@ -3055,7 +3152,14 @@ def _apply_value_reinforcement(records, headers, references, cancellation=None):
                         open_documents[record["pdf_path"]] = document
                     page = document[record["page_index"]]
                     detected = TEXT_EXTRACTOR._ocr_value_detect(
-                        page, rect, enhance=True
+                        page,
+                        rect,
+                        enhance=True,
+                        dpi=details.get("value_dpi", OCR_VALUE_RECOGNITION_DPI),
+                        limit_side_len=details.get(
+                            "value_det_limit_side_len",
+                            OCR_VALUE_DET_LIMIT_SIDE_LEN,
+                        ),
                     )
                     enhanced_text = TEXT_EXTRACTOR._recognized_consensus_text(
                         details.get("page_detected"), detected, rect
@@ -3151,7 +3255,9 @@ def _collect_pdf_rows(
     overall_state=None,
     cancellation=None,
     sheet_name="",
+    pdf_collection_mode=PDF_MODE_STANDARD,
 ):
+    mode = validate_pdf_collection_mode(pdf_collection_mode)
     rows = []
     records = []
     summary = processing_summary if processing_summary is not None else {}
@@ -3162,6 +3268,11 @@ def _collect_pdf_rows(
     summary.setdefault("deskew_pages", [])
     summary.setdefault("orientation_pages", [])
     summary.setdefault("preprocess_rejected_pages", [])
+    summary["pdf_collection_mode"] = mode
+    summary["experimental"] = mode == PDF_MODE_CAREFUL
+    summary.setdefault("fast_skipped_pages", [])
+    summary.setdefault("fast_skipped_files", [])
+    summary.setdefault("fast_skipped_field_count", 0)
     for pdf_path in pdf_paths:
         filename = os.path.basename(pdf_path)
         try:
@@ -3179,9 +3290,13 @@ def _collect_pdf_rows(
                         except Exception:
                             has_native_text = False
                         work_type = (
-                            "ocr"
-                            if force_ocr or int(page.rotation) % 360 or not has_native_text
-                            else "native_text"
+                            "native_text"
+                            if mode == PDF_MODE_FAST and not force_ocr
+                            else (
+                                "ocr"
+                                if force_ocr or int(page.rotation) % 360 or not has_native_text
+                                else "native_text"
+                            )
                         )
                         activity = (
                             "PDF 텍스트 추출 중"
@@ -3205,10 +3320,26 @@ def _collect_pdf_rows(
                     ]
                     values = {}
                     details_by_header = {}
+                    rotated_fast_page = bool(
+                        mode == PDF_MODE_FAST
+                        and not force_ocr
+                        and int(page.rotation) % 360
+                    )
                     for header in headers:
                         if not header:
                             continue
-                        if header in mapping:
+                        if rotated_fast_page and header in mapping:
+                            text_value = ""
+                            value_details = {
+                                "mode": "unavailable_without_ocr",
+                                "primary_text": "",
+                                "enhanced_text": None,
+                                "low_quality_gate": False,
+                                "rect": tuple(mapping[header]["rect"]),
+                                "requires_ocr": True,
+                                "reason": ROTATED_PAGE_REQUIRES_OCR,
+                            }
+                        elif header in mapping:
                             text_value, value_details = TEXT_EXTRACTOR.extract_text(
                                 page,
                                 mapping[header],
@@ -3216,6 +3347,7 @@ def _collect_pdf_rows(
                                     force_ocr or bool(int(page.rotation) % 360)
                                 ),
                                 return_details=True,
+                                pdf_collection_mode=mode,
                             )
                         else:
                             text_value = ""
@@ -3234,7 +3366,20 @@ def _collect_pdf_rows(
                         "page_index": page_index,
                         "values": values,
                         "details": details_by_header,
+                        "fast_rotated": rotated_fast_page,
                     })
+                    if rotated_fast_page:
+                        summary["rotated_pages"].append({
+                            "file": filename,
+                            "page": page_index + 1,
+                            "rotation": int(page.rotation) % 360,
+                            "reason": ROTATED_PAGE_REQUIRES_OCR,
+                        })
+                        logging.info(
+                            "FAST_MODE_ROTATED_PAGE_EXCLUDED: file=%s, page=%s",
+                            filename,
+                            page_index + 1,
+                        )
                     preprocess_result = TEXT_EXTRACTOR.last_preprocess_result
                     if preprocess_result is not None:
                         if preprocess_result.orientation_applied:
@@ -3284,14 +3429,18 @@ def _collect_pdf_rows(
         finally:
             TEXT_EXTRACTOR.release_pdf_cache(pdf_path)
 
-    references = _resolve_header_reference_formats(records, headers)
+    references = (
+        {} if mode == PDF_MODE_FAST
+        else _resolve_header_reference_formats(records, headers)
+    )
     reinforcement_ocr_start = TEXT_EXTRACTOR.ocr_statistics()[
         "total_ocr_inference_count"
     ]
     reinforcement_started_at = time.monotonic()
-    _apply_value_reinforcement(
-        records, headers, references, cancellation=cancellation
-    )
+    if mode != PDF_MODE_FAST:
+        _apply_value_reinforcement(
+            records, headers, references, cancellation=cancellation
+        )
     reinforcement_duration = time.monotonic() - reinforcement_started_at
     reinforcement_ocr_count = (
         TEXT_EXTRACTOR.ocr_statistics()["total_ocr_inference_count"]
@@ -3308,11 +3457,47 @@ def _collect_pdf_rows(
 
     files_with_text = set()
     for record in records:
-        page_has_text = any(record["values"].get(header, "") for header in headers if header)
+        mapped_headers = [header for header in headers if header in mapping]
+        if mode == PDF_MODE_FAST and not force_ocr:
+            missing = [
+                header for header in mapped_headers
+                if not (
+                    record["details"].get(header, {}).get("mode") == "native"
+                    and str(record["values"].get(header, "")).strip()
+                    and not record["details"].get(header, {}).get("requires_ocr")
+                )
+            ]
+            page_has_text = bool(mapped_headers) and not missing
+            if missing:
+                summary["fast_skipped_field_count"] += len(missing)
+                skipped = {
+                    "file": record["filename"],
+                    "page": record["page_index"] + 1,
+                    "reason": (
+                        ROTATED_PAGE_REQUIRES_OCR
+                        if record.get("fast_rotated")
+                        else "MAPPED_FIELD_REQUIRES_OCR"
+                    ),
+                    "missing_field_count": len(missing),
+                }
+                summary["fast_skipped_pages"].append(skipped)
+                logging.info(
+                    "FAST_MODE_PAGE_EXCLUDED: file=%s, page=%s, reason=%s, missing_fields=%s",
+                    skipped["file"], skipped["page"], skipped["reason"], len(missing),
+                )
+        else:
+            page_has_text = any(
+                record["values"].get(header, "") for header in headers if header
+            )
         if page_has_text:
             rows.append(record["values"])
             files_with_text.add(record["filename"])
             summary["processed_pages"] += 1
+            if mode == PDF_MODE_FAST:
+                logging.info(
+                    "FAST_MODE_ROW_ACCEPTED: file=%s, page=%s",
+                    record["filename"], record["page_index"] + 1,
+                )
         else:
             empty_page = {
                 "file": record["filename"],
@@ -3333,12 +3518,23 @@ def _collect_pdf_rows(
         filename = os.path.basename(pdf_path)
         if filename not in files_with_text and filename not in failed_files:
             failed_files.append(filename)
+            if mode == PDF_MODE_FAST:
+                summary["fast_skipped_files"].append(filename)
     summary["ocr_statistics"] = TEXT_EXTRACTOR.ocr_statistics()
+    summary["fast_skipped_page_count"] = len(summary["fast_skipped_pages"])
+    summary["fast_skipped_file_count"] = len(summary["fast_skipped_files"])
     return rows
 
 
 def _processing_summary_text(summary, failed_files):
+    mode = summary.get("pdf_collection_mode", PDF_MODE_STANDARD)
+    mode_label = {
+        PDF_MODE_FAST: "신속",
+        PDF_MODE_STANDARD: "표준",
+        PDF_MODE_CAREFUL: "신중(실험적)",
+    }.get(mode, "표준")
     lines = [
+        f"PDF 취합 모드: {mode_label}",
         f"정상 처리: {summary.get('processed_pages', 0)}페이지",
         f"빈 결과: {len(summary.get('empty_pages', []))}페이지",
         f"회전 보정: {len(summary.get('orientation_pages', []))}페이지",
@@ -3349,6 +3545,11 @@ def _processing_summary_text(summary, failed_files):
             f"{len(summary.get('ocr_unavailable_pages', []))}페이지"
         ),
     ]
+    if mode == PDF_MODE_FAST:
+        lines.extend((
+            f"OCR 건너뛰기로 제외: {summary.get('fast_skipped_page_count', 0)}페이지",
+            f"신속 모드 OCR 필요 필드: {summary.get('fast_skipped_field_count', 0)}개",
+        ))
     ocr_stats = summary.get("ocr_statistics", {})
     if ocr_stats:
         lines.extend((
@@ -3394,14 +3595,29 @@ def _processing_summary_text(summary, failed_files):
     return "\n".join(lines)
 
 
-def run_application(parent_root, force_ocr=False):
+def run_application(
+    parent_root,
+    force_ocr=False,
+    pdf_collection_mode=PDF_MODE_STANDARD,
+):
     """PDF 영역 취합을 그리드 설정과 선택적 매핑 프로파일로 실행합니다."""
     logging.info("=== %s PDF Drag 취합 가동 시작 ===", PROGRAM_NAME)
     wb_data = None
     wb_write = None
     progress = None
     try:
+        mode = validate_pdf_collection_mode(pdf_collection_mode, fallback=True)
         TEXT_EXTRACTOR.reset_work_cache()
+        logging.info(
+            "PDF_COLLECTION_MODE_SELECTED: mode=%s, experimental=%s",
+            mode,
+            mode == PDF_MODE_CAREFUL,
+        )
+        if force_ocr:
+            logging.info(
+                "FORCE_OCR_DIAGNOSTIC_MODE_USED: requested_mode=%s, effective=force_ocr",
+                mode,
+            )
         if force_ocr and RapidOCR is None:
             messagebox.showerror(
                 PROGRAM_NAME,
@@ -3521,7 +3737,16 @@ def run_application(parent_root, force_ocr=False):
                                     has_text = bool(page.get_text("text").strip())
                                 except Exception:
                                     has_text = False
-                                planned_work.append(("ocr" if force_ocr or int(page.rotation) % 360 or not has_text else "native_text", ocr_weight))
+                                planned_work.append((
+                                    "native_text"
+                                    if mode == PDF_MODE_FAST and not force_ocr
+                                    else (
+                                        "ocr"
+                                        if force_ocr or int(page.rotation) % 360 or not has_text
+                                        else "native_text"
+                                    ),
+                                    ocr_weight,
+                                ))
                     except Exception:
                         pass
         from processing_cancellation import ProcessingCancellation
@@ -3537,6 +3762,8 @@ def run_application(parent_root, force_ocr=False):
         wb_write = load_workbook(template_path, keep_vba=keep_vba)
         failed_files = []
         processing_summary = {
+            "pdf_collection_mode": mode,
+            "experimental": mode == PDF_MODE_CAREFUL,
             "processed_pages": 0,
             "empty_pages": [],
             "rotated_pages": [],
@@ -3569,6 +3796,7 @@ def run_application(parent_root, force_ocr=False):
                     overall_state,
                     cancellation,
                     sheet_name,
+                    mode,
                 )
                 if cancellation.should_cancel():
                     break
@@ -3661,6 +3889,7 @@ def run_application(parent_root, force_ocr=False):
                 + f"\n\n저장: {output_path}",
                 parent=parent_root,
             )
+        parent_root._dns_last_pdf_summary = dict(processing_summary)
         os.startfile(os.path.dirname(output_path))
         return True
     except Exception as error:

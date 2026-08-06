@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -44,12 +45,24 @@ def merge_pdfs(
     force_ocr: bool = False,
     report: ProgressReporter | None = None,
     cancellation: ProcessingCancellation | None = None,
+    pdf_collection_mode: str = drag_engine.PDF_MODE_STANDARD,
 ) -> JobResult:
+    mode = drag_engine.validate_pdf_collection_mode(pdf_collection_mode)
     template = Path(template_path)
     if template.suffix.lower() not in {".xlsx", ".xlsm"}:
         raise ValueError("템플릿은 .xlsx 또는 .xlsm 파일이어야 합니다.")
     if force_ocr and drag_engine.RapidOCR is None:
         raise RuntimeError("강제 OCR에 필요한 rapidocr/onnxruntime을 사용할 수 없습니다.")
+    logging.info(
+        "PDF_COLLECTION_MODE_SELECTED: mode=%s, experimental=%s",
+        mode,
+        mode == drag_engine.PDF_MODE_CAREFUL,
+    )
+    if force_ocr:
+        logging.info(
+            "FORCE_OCR_DIAGNOSTIC_MODE_USED: requested_mode=%s, effective=force_ocr",
+            mode,
+        )
     with Path(profile_path).open(encoding="utf-8") as file:
         profile = json.load(file)
     mapping_sets = profile.get("mapping_sets")
@@ -63,6 +76,8 @@ def merge_pdfs(
     write_book = load_workbook(template, keep_vba=keep_vba)
     failed_files: list[str] = []
     summary = {
+        "pdf_collection_mode": mode,
+        "experimental": mode == drag_engine.PDF_MODE_CAREFUL,
         "processed_pages": 0,
         "empty_pages": [],
         "rotated_pages": [],
@@ -89,14 +104,20 @@ def merge_pdfs(
                     try:
                         with fitz.open(path) as document:
                             for page in document:
-                                if int(page.rotation) % 360:
-                                    planned_work.append(("skipped", 1))
-                                else:
-                                    try:
-                                        has_text = bool(page.get_text("text").strip())
-                                    except Exception:
-                                        has_text = False
-                                    planned_work.append(("ocr" if force_ocr or not has_text else "native_text", weight))
+                                try:
+                                    has_text = bool(page.get_text("text").strip())
+                                except Exception:
+                                    has_text = False
+                                planned_work.append((
+                                    "native_text"
+                                    if mode == drag_engine.PDF_MODE_FAST and not force_ocr
+                                    else (
+                                        "ocr"
+                                        if force_ocr or int(page.rotation) % 360 or not has_text
+                                        else "native_text"
+                                    ),
+                                    weight,
+                                ))
                     except Exception:
                         planned_work.append(("failed", 1))
         estimator = ProcessingTimeEstimator(planned_work)
@@ -161,7 +182,7 @@ def merge_pdfs(
                     raise ValueError(f"{sheet_name} 시트에 연결된 PDF 파일이 없습니다.")
                 rows = drag_engine._collect_pdf_rows(
                     paths, headers, mapping, force_ocr, failed_files, summary,
-                    CallbackProgress(), overall, cancellation, sheet_name
+                    CallbackProgress(), overall, cancellation, sheet_name, mode
                 )
                 if cancellation is not None and cancellation.should_cancel():
                     return JobResult(JobState.CANCELLED, message="PDF merge cancelled")

@@ -37,7 +37,7 @@ def main():
     try:
         selector = engine_Sheet.MultiSheetSelector(
             root,
-            r"Z:\DnS_Auto_nonexistent\preview.xlsx",
+            r"C:\DnS_AI 출품자료\존재하지_않는_미리보기.xlsx",
             ["시험"],
         )
         checks["warning_shown_once"] = len(warnings) == 1

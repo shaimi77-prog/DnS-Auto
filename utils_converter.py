@@ -1,8 +1,9 @@
-"""Word, HWP 및 구버전 Excel 파일의 일괄 변환 기능."""
+﻿"""Word, HWP 및 구버전 Excel 파일의 일괄 변환 기능."""
 
 from __future__ import annotations
 
 import ctypes
+import datetime
 import logging
 import os
 from pathlib import Path
@@ -17,6 +18,8 @@ import win32com.client as win32
 from config import PROGRAM_NAME
 from core.models import JobState
 from processing_cancellation import ProcessingCancellation
+from processing_time import ProcessingTimeEstimator
+from com_process_ownership import Ownership, capture_processes, cleanup_com_session, confirm_ownership, detached_quit_callback
 from services import conversion_service
 
 
@@ -118,6 +121,31 @@ class ProgressWindow:
         except tk.TclError:
             self._closed = True
 
+    def update_from_event(self, event):
+        """서비스의 공용 ETA 메타데이터를 그대로 표시한다."""
+        if self._closed or self.is_cancelled:
+            return
+        try:
+            self.current = min(max(int(event.completed), 0), self.total)
+            self.file_var.set(f"현재 파일: {os.path.basename(event.current_file or '')}")
+            elapsed = datetime.timedelta(seconds=max(int(event.elapsed_seconds), 0))
+            remaining = event.estimated_remaining_seconds
+            remaining_text = (
+                f"약 {datetime.timedelta(seconds=max(int(remaining), 0))}"
+                if remaining is not None
+                else "계산 중"
+            )
+            self.status_var.set(
+                f"{self.total}개 파일 중 {self.current}개 완료 · {event.message}\n"
+                f"경과 {elapsed} · 예상 잔여 시간 {remaining_text}"
+            )
+            self.canvas.coords(
+                self.bar, 0, 0, 360 * min(self.current / self.total, 1), 15
+            )
+            self.top.update()
+        except tk.TclError:
+            self._closed = True
+
     def post(self, callback):
         token = self._generation
 
@@ -178,11 +206,7 @@ def _run_service_conversion(parent, paths, title, output_folder, service):
 
     def report(event):
         progress.post(
-            lambda: progress.update_progress(
-                event.completed,
-                os.path.basename(event.current_file or ""),
-                event.message,
-            )
+            lambda: progress.update_from_event(event)
         )
 
     def worker():
@@ -273,22 +297,30 @@ def convert_hwp_to_pdf(parent_root):
         "한글 연동 중 보안 승인 팝업이 표시되면 [모두 허용]을 선택해 주세요.",
         parent=progress.top,
     )
+    estimator = ProcessingTimeEstimator(
+        [("hwp_to_pdf", 1)] * len(paths), minimum_samples=1
+    )
+    estimator.start()
 
     def worker():
         pythoncom.CoInitialize()
         hwp = None
+        ownership = Ownership("unconfirmed")
+        cleanup_details = None
         failed = []
         try:
             try:
-                hwp = win32.gencache.EnsureDispatch("HWPFrame.HwpObject")
+                before = capture_processes(["Hwp.exe"])
             except Exception:
-                hwp = win32.Dispatch("HWPFrame.HwpObject")
+                before = {}
+            hwp = win32.DispatchEx("HWPFrame.HwpObject")
             try:
                 hwp.RegisterModule("FilePathCheckDLL", "FilePathCheckerModule")
                 hwnd = hwp.XHwpWindows.Item(0).WindowHandle
                 if hwnd:
                     ctypes.windll.user32.ShowWindow(hwnd, 5)
                     ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    ownership = confirm_ownership(before, int(hwnd), ["Hwp.exe"])
             except Exception:
                 logging.warning("HWP 보안 모듈 등록 또는 창 제어 실패", exc_info=True)
 
@@ -302,6 +334,8 @@ def convert_hwp_to_pdf(parent_root):
                     )
                 )
                 cancellation.reserve_output(target)
+                estimator.begin("hwp_to_pdf")
+                successful = False
                 try:
                     hwp.Open(os.path.abspath(source), "", "force")
                     hwp.HAction.GetDefault(
@@ -314,11 +348,31 @@ def convert_hwp_to_pdf(parent_root):
                     )
                     if executed is False or not target.is_file() or target.stat().st_size == 0:
                         raise OSError("HWP PDF 결과 파일이 생성되지 않았습니다.")
+                    successful = True
                 except Exception:
                     target.unlink(missing_ok=True)
                     failed.append(filename)
+                finally:
+                    try:
+                        hwp.HAction.Run("FileClose")
+                    except Exception:
+                        logging.warning("HWP 문서 닫기 실패", exc_info=True)
+                estimator.complete(
+                    successful=successful and not cancellation.should_cancel()
+                )
                 progress.post(
-                    lambda i=index, name=filename: progress.update_progress(i, name)
+                    lambda i=index, name=filename, metadata=estimator.metadata(): progress.update_from_event(
+                        type(
+                            "HwpProgressEvent",
+                            (),
+                            {
+                                "completed": i,
+                                "current_file": name,
+                                "message": "HWP 변환 완료",
+                                **metadata,
+                            },
+                        )()
+                    )
                 )
                 if cancellation.should_cancel():
                     break
@@ -330,12 +384,18 @@ def convert_hwp_to_pdf(parent_root):
                 )
             )
         finally:
-            if hwp is not None:
-                try:
-                    hwp.Quit()
-                except Exception:
-                    logging.warning("HWP 종료 실패", exc_info=True)
-            pythoncom.CoUninitialize()
+            quit_callback = detached_quit_callback(hwp) if hwp is not None else None
+            hwp = None
+            cleanup_details = cleanup_com_session(
+                application="hwp",
+                close_callbacks=[],
+                quit_callback=quit_callback,
+                ownership=ownership,
+                co_uninitialize=pythoncom.CoUninitialize,
+                allow_forced_cleanup=True,
+            )
+            if cleanup_details["process_exit_status"] not in {"exited", "unknown"}:
+                logging.warning("HWP COM 정리 미완료: %s", cleanup_details)
             if cancellation.should_cancel():
                 failures = cancellation.rollback_outputs()
                 result = type(

@@ -1,4 +1,4 @@
-"""Automated modal/lifecycle smoke test for conversion progress."""
+﻿"""Automated modal/lifecycle smoke test for conversion progress."""
 
 import json
 import tkinter as tk

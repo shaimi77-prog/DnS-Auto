@@ -12,6 +12,8 @@ from openpyxl import load_workbook
 
 from core.models import JobResult, JobState, ProgressEvent
 from processing_cancellation import ProcessingCancellation
+from processing_time import ProcessingTimeEstimator
+from com_process_ownership import Ownership, capture_processes, cleanup_com_session, confirm_ownership, detached_quit_callback
 
 
 ProgressReporter = Callable[[ProgressEvent], None]
@@ -27,11 +29,20 @@ def _convert_xls_to_xlsx(source: Path) -> Path:
     handle.close()
     converted.unlink(missing_ok=True)
     excel = workbook = None
+    ownership = Ownership("unconfirmed")
+    try:
+        before = capture_processes(["EXCEL.EXE"])
+    except Exception:
+        before = {}
     pythoncom.CoInitialize()
     try:
         excel = win32.DispatchEx("Excel.Application")
         excel.Visible = False
         excel.DisplayAlerts = False
+        try:
+            ownership = confirm_ownership(before, int(excel.Hwnd), ["EXCEL.EXE"])
+        except Exception:
+            ownership = Ownership("unconfirmed")
         workbook = excel.Workbooks.Open(
             str(source.resolve()),
             Password="DummyPassword123!",
@@ -44,10 +55,21 @@ def _convert_xls_to_xlsx(source: Path) -> Path:
         raise
     finally:
         if workbook is not None:
-            workbook.Close(SaveChanges=False)
-        if excel is not None:
-            excel.Quit()
-        pythoncom.CoUninitialize()
+            try:
+                workbook.Close(SaveChanges=False)
+            except Exception:
+                pass
+            workbook = None
+        quit_callback = detached_quit_callback(excel) if excel is not None else None
+        excel = None
+        cleanup_com_session(
+            application="excel",
+            close_callbacks=[],
+            quit_callback=quit_callback,
+            ownership=ownership,
+            co_uninitialize=pythoncom.CoUninitialize,
+            allow_forced_cleanup=True,
+        )
 
 
 def _last_data_row(worksheet, minimum_row: int) -> int:
@@ -112,6 +134,15 @@ def merge_workbooks(
     output_root.mkdir(parents=True, exist_ok=True)
     target = load_workbook(template, keep_vba=keep_vba)
     failed, copied_rows = [], 0
+    work_types = ["xls_merge" if source.suffix.lower() == ".xls" else "xlsx_merge" for source in sources]
+    estimator = ProcessingTimeEstimator(zip(work_types, [1] * len(sources)), minimum_samples=1)
+    estimator.start()
+
+    def event(completed, message, source, *, sheet=None):
+        return ProgressEvent(
+            completed, len(sources), message, str(source), current_sheet=sheet,
+            activity="excel", **estimator.metadata()
+        )
     try:
         missing_sheets = set(configs) - set(target.sheetnames)
         if missing_sheets:
@@ -136,22 +167,26 @@ def merge_workbooks(
 
         for index, source in enumerate(sources, start=1):
             if cancellation is not None and cancellation.should_cancel():
-                return JobResult(JobState.CANCELLED, message="Excel 취합이 취소되었습니다.")
+                return JobResult(
+                    JobState.CANCELLED,
+                    message="Excel 취합이 취소되었습니다.",
+                    details={"timing": estimator.summary()},
+                )
             if report:
                 report(
-                    ProgressEvent(
-                        index - 1,
-                        len(sources),
-                        "Excel 취합 중",
-                        str(source),
-                        activity="excel",
-                    )
+                    event(index - 1, "Excel 취합 중", source)
                 )
             if source.resolve() == template.resolve():
                 failed.append(str(source))
+                estimator.begin(work_types[index - 1])
+                estimator.complete(successful=False)
+                if report:
+                    report(event(index, "Excel 취합 건너뜀", source))
                 continue
+            estimator.begin(work_types[index - 1])
             workbook = None
             converted = None
+            successful = False
             try:
                 source_to_open = source
                 if source.suffix.lower() == ".xls":
@@ -161,14 +196,7 @@ def merge_workbooks(
                 for name, config in configs.items():
                     if report:
                         report(
-                            ProgressEvent(
-                                index - 1,
-                                len(sources),
-                                "Excel 시트 취합 중",
-                                str(source),
-                                current_sheet=name,
-                                activity="excel",
-                            )
+                            event(index - 1, "Excel 시트 취합 중", source, sheet=name)
                         )
                     if name not in workbook.sheetnames:
                         continue
@@ -215,6 +243,7 @@ def merge_workbooks(
                             cell.value = value
                             wrote = True
                         copied_rows += int(wrote)
+                successful = True
             except Exception:
                 failed.append(str(source))
             finally:
@@ -222,38 +251,45 @@ def merge_workbooks(
                     workbook.close()
                 if converted is not None:
                     converted.unlink(missing_ok=True)
+            sampled = successful and not (
+                cancellation is not None and cancellation.should_cancel()
+            )
+            estimator.complete(successful=sampled)
             if report:
-                report(
-                    ProgressEvent(
-                        index,
-                        len(sources),
-                        "Excel 취합 완료",
-                        str(source),
-                        activity="excel",
-                    )
-                )
+                report(event(index, "Excel 취합 완료", source))
             if cancellation is not None and cancellation.should_cancel():
-                return JobResult(JobState.CANCELLED, message="Excel 취합이 취소되었습니다.")
+                if sampled:
+                    estimator.discard_last_sample(work_types[index - 1])
+                return JobResult(
+                    JobState.CANCELLED,
+                    message="Excel 취합이 취소되었습니다.",
+                    details={"timing": estimator.summary()},
+                )
 
         if copied_rows == 0:
             return JobResult(
                 JobState.FAILED,
                 failed_files=failed,
                 message="취합할 데이터가 없습니다.",
+                details={"timing": estimator.summary()},
             )
         extension = ".xlsm" if keep_vba else ".xlsx"
         output = output_root / (
             f"DnS_Auto_Sheet다중취합_{datetime.now():%H%M%S_%f}{extension}"
         )
         if cancellation is not None and not cancellation.enter_save_phase():
-            return JobResult(JobState.CANCELLED, message="Excel 취합이 취소되었습니다.")
+            return JobResult(
+                JobState.CANCELLED,
+                message="Excel 취합이 취소되었습니다.",
+                details={"timing": estimator.summary()},
+            )
         target.save(output)
         return JobResult(
             JobState.SUCCEEDED if not failed else JobState.FAILED,
             output_files=[str(output)],
             failed_files=failed,
             message="Excel 취합 완료",
-            details={"copied_rows": copied_rows},
+            details={"copied_rows": copied_rows, "timing": estimator.summary()},
         )
     finally:
         target.close()

@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import engine_Drag
 from core.job_manager import JobManager
 from core.models import JobResult, JobState
 from processing_cancellation import ProcessingCancellation
@@ -32,9 +33,9 @@ TOOLS = [
     {"name": "discover_merge_plan", "description": "inputs와 profiles를 재귀 검색해 작업 종류·양식·원본·호환 프로필을 판별합니다. 임의 선택 없이 ready, needs_confirmation 또는 needs_clarification과 질문 목록을 반환합니다.", "inputSchema": {"type": "object", "properties": {"input_root": {"type": "string", "description": "생략하면 포터블 폴더의 inputs를 사용합니다."}, "operation": {"enum": ["auto", "excel", "pdf"], "default": "auto"}, "template_path": {"type": "string"}, "profile_name": {"type": "string"}, "interactive": {"type": "boolean", "default": False}}, "additionalProperties": False}},
     {"name": "start_document_conversion", "description": "DOCX·HWP 또는 XLS 변환 작업을 시작하고 작업 ID를 반환합니다.", "inputSchema": {"type": "object", "properties": {"kind": {"enum": ["docx_to_pdf", "hwp_to_pdf", "xls_to_xlsx"]}, "paths": {"type": "array", "items": {"type": "string"}}}, "required": ["kind", "paths"]}},
     {"name": "start_sheet_merge", "description": "저장된 Sheet 설정 프로필로 Excel 취합 작업을 시작합니다.", "inputSchema": {"type": "object", "properties": {"template_path": {"type": "string"}, "source_paths": {"type": "array", "items": {"type": "string"}}, "profile_path": {"type": "string"}}, "required": ["template_path", "source_paths", "profile_path"]}},
-    {"name": "start_pdf_merge", "description": "저장된 PDF 매핑 프로필로 PDF/OCR 취합 작업을 시작합니다.", "inputSchema": {"type": "object", "properties": {"template_path": {"type": "string"}, "pdfs_by_sheet": {"type": "object"}, "profile_path": {"type": "string"}, "force_ocr": {"type": "boolean"}}, "required": ["template_path", "pdfs_by_sheet", "profile_path"]}},
+    {"name": "start_pdf_merge", "description": "저장된 PDF 매핑 프로필로 PDF/OCR 취합 작업을 시작합니다.", "inputSchema": {"type": "object", "properties": {"template_path": {"type": "string"}, "pdfs_by_sheet": {"type": "object"}, "profile_path": {"type": "string"}, "force_ocr": {"type": "boolean"}, "pdf_collection_mode": {"enum": ["fast", "standard", "careful"], "default": "standard"}}, "required": ["template_path", "pdfs_by_sheet", "profile_path"], "additionalProperties": False}},
     {"name": "start_interactive_sheet_merge", "description": "프로필 없이 Excel 설정 창을 열어 사용자가 시트·헤더·취합 영역을 지정한 뒤 취합합니다.", "inputSchema": {"type": "object", "properties": {"template_path": {"type": "string"}, "source_paths": {"type": "array", "items": {"type": "string"}}}, "required": ["template_path", "source_paths"]}},
-    {"name": "start_interactive_pdf_merge", "description": "프로필 없이 PDF 설정·영역 드래그 창을 열어 사용자가 매핑한 뒤 PDF/OCR 취합을 계속합니다.", "inputSchema": {"type": "object", "properties": {"template_path": {"type": "string"}, "pdfs_by_sheet": {"type": "object"}, "force_ocr": {"type": "boolean"}}, "required": ["template_path"]}},
+    {"name": "start_interactive_pdf_merge", "description": "프로필 없이 PDF 설정·영역 드래그 창을 열어 사용자가 매핑한 뒤 PDF/OCR 취합을 계속합니다.", "inputSchema": {"type": "object", "properties": {"template_path": {"type": "string"}, "pdfs_by_sheet": {"type": "object"}, "force_ocr": {"type": "boolean"}, "pdf_collection_mode": {"enum": ["fast", "standard", "careful"], "default": "standard"}}, "required": ["template_path"], "additionalProperties": False}},
     {"name": "get_job_status", "description": "작업의 현재 상태와 마지막 진행 이벤트를 조회합니다.", "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}},
     {"name": "get_job_result", "description": "완료 작업의 산출물·실패 목록·요약을 조회합니다.", "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}},
     {"name": "cancel_job", "description": "Request cancellation of a running job after the current OCR or Office call finishes; no result file is saved.", "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}},
@@ -139,6 +140,9 @@ def call(name: str, args: dict[str, Any]) -> dict[str, Any]:
             ), cancellation=cancellation
         )}
     if name == "start_pdf_merge":
+        pdf_mode = engine_Drag.validate_pdf_collection_mode(
+            args.get("pdf_collection_mode", engine_Drag.PDF_MODE_STANDARD)
+        )
         raw_pdfs = [path for paths in args["pdfs_by_sheet"].values() for path in paths]
         paths = checked([args["template_path"], args["profile_path"], *raw_pdfs], settings)
         checked_pdfs, offset = {}, 2
@@ -149,7 +153,8 @@ def call(name: str, args: dict[str, Any]) -> dict[str, Any]:
         return {"job_id": JOBS.start(
             lambda report: pdf_service.merge_pdfs(
                 paths[0], checked_pdfs, paths[1], output,
-                bool(args.get("force_ocr")), report, cancellation
+                bool(args.get("force_ocr")), report, cancellation,
+                pdf_collection_mode=pdf_mode,
             ), cancellation=cancellation
         )}
     if name == "start_interactive_sheet_merge":
@@ -157,6 +162,9 @@ def call(name: str, args: dict[str, Any]) -> dict[str, Any]:
         payload = {"mode": "sheet", "template_path": paths[0], "source_paths": paths[1:], "output_root": output}
         return {"job_id": JOBS.start(lambda report: run_interactive(payload), initial_state=JobState.NEEDS_USER_ACTION), "state": JobState.NEEDS_USER_ACTION.value, "user_action": "Excel 설정 창에서 시트, 헤더 범위와 취합 방식을 지정해 주세요."}
     if name == "start_interactive_pdf_merge":
+        pdf_mode = engine_Drag.validate_pdf_collection_mode(
+            args.get("pdf_collection_mode", engine_Drag.PDF_MODE_STANDARD)
+        )
         pdfs_by_sheet = args.get("pdfs_by_sheet", {})
         raw_pdfs = [path for paths in pdfs_by_sheet.values() for path in paths]
         paths = checked([args["template_path"], *raw_pdfs], settings)
@@ -165,7 +173,7 @@ def call(name: str, args: dict[str, Any]) -> dict[str, Any]:
         for sheet_name, sheet_paths in pdfs_by_sheet.items():
             checked_pdfs[sheet_name] = paths[offset:offset + len(sheet_paths)]
             offset += len(sheet_paths)
-        payload = {"mode": "pdf", "template_path": paths[0], "pdfs_by_sheet": checked_pdfs, "force_ocr": bool(args.get("force_ocr")), "output_root": output}
+        payload = {"mode": "pdf", "template_path": paths[0], "pdfs_by_sheet": checked_pdfs, "force_ocr": bool(args.get("force_ocr")), "pdf_collection_mode": pdf_mode, "output_root": output}
         return {"job_id": JOBS.start(lambda report: run_interactive(payload), initial_state=JobState.NEEDS_USER_ACTION), "state": JobState.NEEDS_USER_ACTION.value, "user_action": "PDF 설정 창에서 시트·헤더를 지정하고 각 필드의 PDF 영역을 드래그해 주세요."}
     if name == "cancel_job":
         requested = JOBS.cancel(args["job_id"])

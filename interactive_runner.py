@@ -71,7 +71,13 @@ def run_request(request_path: str) -> int:
         if mode == "sheet":
             engine_Sheet.run_application(root)
         elif mode == "pdf":
-            engine_Drag.run_application(root, force_ocr=bool(request.get("force_ocr")))
+            engine_Drag.run_application(
+                root,
+                force_ocr=bool(request.get("force_ocr")),
+                pdf_collection_mode=request.get(
+                    "pdf_collection_mode", engine_Drag.PDF_MODE_STANDARD
+                ),
+            )
         else:
             raise ValueError(f"지원하지 않는 대화형 작업입니다: {mode}")
         created = sorted(_output_candidates(template.parent, mode) - before, key=lambda path: path.stat().st_mtime_ns)
@@ -81,7 +87,22 @@ def run_request(request_path: str) -> int:
                 target = _unique_destination(output_root, source)
                 shutil.move(str(source), str(target))
                 outputs.append(str(target.resolve()))
-            result = {"state": "succeeded", "output_files": outputs, "failed_files": [], "message": "사용자 설정을 반영한 대화형 취합이 완료되었습니다.", "details": {"interactive": True, "cancelled": False}}
+            details = {"interactive": True, "cancelled": False}
+            if mode == "pdf":
+                summary = getattr(root, "_dns_last_pdf_summary", {})
+                details.update({
+                    "pdf_collection_mode": summary.get(
+                        "pdf_collection_mode",
+                        request.get("pdf_collection_mode", engine_Drag.PDF_MODE_STANDARD),
+                    ),
+                    "experimental": bool(summary.get("experimental", False)),
+                    "fast_skipped_page_count": summary.get("fast_skipped_page_count", 0),
+                    "fast_skipped_file_count": summary.get("fast_skipped_file_count", 0),
+                    "ocr_inference_count": summary.get("ocr_statistics", {}).get(
+                        "total_ocr_inference_count", 0
+                    ),
+                })
+            result = {"state": "succeeded", "output_files": outputs, "failed_files": [], "message": "사용자 설정을 반영한 대화형 취합이 완료되었습니다.", "details": details}
     except Exception as error:
         result = {"state": "failed", "output_files": [], "failed_files": [], "message": str(error), "details": {"interactive": True, "cancelled": False, "traceback": traceback.format_exc()}}
     finally:

@@ -1,19 +1,21 @@
 ﻿import json
+import argparse
+import shutil
 import subprocess
+import tempfile
 import time
-import zipfile
 from pathlib import Path
 from openpyxl import Workbook, load_workbook
 import win32gui
 
-source_root = Path(__file__).resolve().parents[1]
-project_root = source_root.parent
-archive = project_root / "release" / "DnS_Auto_Portable.zip"
-destination = project_root / f"통합_포터블_이동테스트_{time.time_ns()}"
-destination.mkdir()
-with zipfile.ZipFile(archive) as package:
-    package.extractall(destination)
+parser = argparse.ArgumentParser()
+parser.add_argument("--bundle", type=Path, required=True)
+args = parser.parse_args()
+source_bundle = args.bundle.resolve()
+assert source_bundle.is_dir(), source_bundle
+destination = Path(tempfile.mkdtemp(prefix="dns_auto_portable_smoke_"))
 bundle = destination / "DnS Auto"
+shutil.copytree(source_bundle, bundle)
 inputs = bundle / "inputs"
 profile_path = bundle / "profiles" / "sheet" / "profile.json"
 mcp_exe = bundle / "DnS Auto MCP.exe"
@@ -112,3 +114,4 @@ try:
 finally:
     process.terminate()
     process.wait(timeout=10)
+    shutil.rmtree(destination, ignore_errors=True)
