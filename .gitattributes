@@ -6,3 +6,4 @@ DnS[[:space:]]Auto/**/*.jpg filter=lfs diff=lfs merge=lfs -text
 DnS[[:space:]]Auto/**/*.png filter=lfs diff=lfs merge=lfs -text
 DnS[[:space:]]Auto/**/*.gif filter=lfs diff=lfs merge=lfs -text
 DnS[[:space:]]Auto/**/*.eps filter=lfs diff=lfs merge=lfs -text
+DnS[[:space:]]Auto/_internal/ocr_models/*.onnx -filter -diff -merge -text
