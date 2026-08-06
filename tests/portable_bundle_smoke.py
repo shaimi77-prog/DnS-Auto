@@ -20,7 +20,16 @@ inputs = bundle / "inputs"
 profile_path = bundle / "profiles" / "sheet" / "profile.json"
 mcp_exe = bundle / "DnS Auto MCP.exe"
 gui_exe = bundle / "DnS Auto.exe"
-for required in (mcp_exe, gui_exe, bundle / "USER_GUIDE.html", bundle / "GUI_GUIDE.html", bundle / "MCP_GUIDE.html", bundle / "QUICK_START.txt"):
+for required in (
+    mcp_exe,
+    gui_exe,
+    bundle / "DnS_Auto_MCP_사용자_설명서(AI_연동용).html",
+    bundle / "DnS_Auto_사용자_설명서(직접_실행용).html",
+    bundle / "DnS_Auto_빠른_시작_가이드(직접_실행용).html",
+    bundle / "DnS_Auto_통합_설명서.html",
+    bundle / "DnS_Auto_통합_설명서(빠른_시작).html",
+    bundle / "_internal" / "assets" / "guide" / "main-dashboard.jpg",
+):
     assert required.is_file(), required
 
 # 이동된 GUI EXE가 실제 메인 창을 표시하는지 확인합니다.

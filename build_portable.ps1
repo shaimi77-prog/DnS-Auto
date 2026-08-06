@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 $sourceRoot = $PSScriptRoot
 $projectRoot = Split-Path -Parent $sourceRoot
 $python = Join-Path $sourceRoot ".venv_build311\Scripts\python.exe"
@@ -48,11 +48,20 @@ Merge-Directory -Source $guiBundle -Destination $bundleRoot
 
 Copy-Item -LiteralPath (Join-Path $sourceRoot "mcp_policy.json") -Destination $bundleRoot -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $bundleRoot "inputs"), (Join-Path $bundleRoot "outputs"), (Join-Path $bundleRoot "profiles\sheet"), (Join-Path $bundleRoot "profiles\pdf") | Out-Null
-Copy-Item -LiteralPath (Join-Path $sourceRoot "PORTABLE_README.txt") -Destination (Join-Path $bundleRoot "QUICK_START.txt") -Force
-foreach ($name in @("USER_GUIDE.html", "GUI_GUIDE.html", "GUI_QUICK_START.html", "MCP_GUIDE.html", "CODEX_MCP_CONFIG.example.json", "CODEX_MCP_CONFIG.example.toml")) {
+foreach ($name in @(
+    "DnS_Auto_MCP_사용자_설명서(AI_연동용).html",
+    "DnS_Auto_사용자_설명서(직접_실행용).html",
+    "DnS_Auto_빠른_시작_가이드(직접_실행용).html",
+    "DnS_Auto_통합_설명서.html",
+    "DnS_Auto_통합_설명서(빠른_시작).html",
+    "CODEX_MCP_CONFIG.example.json",
+    "CODEX_MCP_CONFIG.example.toml"
+)) {
     Copy-Item -LiteralPath (Join-Path $sourceRoot $name) -Destination $bundleRoot -Force
 }
-Copy-Item -LiteralPath (Join-Path $sourceRoot "assets") -Destination $bundleRoot -Recurse -Force
+$internalRoot = Join-Path $bundleRoot "_internal"
+New-Item -ItemType Directory -Force -Path $internalRoot | Out-Null
+Copy-Item -LiteralPath (Join-Path $sourceRoot "assets") -Destination $internalRoot -Recurse -Force
 
 # 병합된 staging의 복제본에서 GUI와 MCP를 검증한 뒤에만 기존 포터블을 교체합니다.
 & $python -B (Join-Path $sourceRoot "tests\portable_bundle_smoke.py") --bundle $bundleRoot

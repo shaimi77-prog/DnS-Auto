@@ -1,0 +1,8 @@
+{
+  "mcp_servers": {
+    "dns-auto": {
+      "command": "D:\\Apps\\DnS Auto\\DnS Auto MCP.exe",
+      "args": []
+    }
+  }
+}

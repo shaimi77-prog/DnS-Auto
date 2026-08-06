@@ -1,0 +1,74 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DnS Auto MCP 사용자 설명서 - AI 연동용</title><style>body{margin:0;background:#f4f7fb;color:#1f2937;font-family:"Malgun Gothic",sans-serif;line-height:1.7}main{max-width:850px;margin:30px auto;padding:42px 48px;background:#fff;border-radius:16px;box-shadow:0 8px 30px #17255418}h1{color:#123a72}h2{margin-top:2em;padding-bottom:.3em;border-bottom:2px solid #dbeafe;color:#174d8c}h3{color:#245b95}.lead,.note,.warn{padding:15px 18px;border-radius:10px}.lead{background:#eff6ff;border-left:5px solid #2563eb}.note{background:#ecfdf5;border-left:5px solid #10b981}.warn{background:#fff7ed;border-left:5px solid #f97316}code{background:#eef2f7;padding:2px 6px;border-radius:5px}pre{padding:15px;overflow:auto;background:#111827;color:#fff;border-radius:9px}li{margin:.45em 0}table{width:100%;border-collapse:collapse}th,td{padding:10px;border:1px solid #dbe2ea;text-align:left}th{background:#eff6ff}.guide-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:14px 0}.guide-card{display:block;padding:14px 16px;border:1px solid #bfdbfe;border-radius:11px;background:#f8fbff;text-decoration:none}.guide-card b{display:block;color:#174d8c}.guide-card span{display:block;margin-top:4px;color:#4b5563;font-size:.92em}@media(max-width:650px){.guide-row{grid-template-columns:1fr}}@media print{body{background:#fff}main{margin:0;padding:10mm;box-shadow:none}}</style></head><body><main>
+<h1>DnS Auto MCP 사용자 설명서 <small>- AI 연동용</small></h1>
+<p class="lead"><b>이 프로그램은 무엇인가요?</b><br>MCP를 지원하는 AI 프로그램이 Excel 취합, PDF/OCR 취합, 문서 변환 같은 DnS Auto 기능을 사용할 수 있도록 연결해 주는 프로그램입니다. 버튼을 누르는 일반 화면은 없으며 연결된 AI 프로그램이 뒤에서 자동으로 실행합니다.</p>
+<h2>1. 시작하기 전에</h2><ul><li>Windows용 프로그램입니다.</li><li>압축을 푼 폴더는 통째로 보관해야 합니다.</li><li>DOCX, HWP/HWPX 또는 XLS 문서 변환은 해당 프로그램이 PC에 설치되어 있어야 합니다.</li><li><code>DnS Auto MCP.exe</code>를 더블클릭해도 일반 화면이 나오지 않는 것이 정상입니다.</li></ul>
+<h2>2. 설치하기</h2><ol><li><code>DnS_Auto_Portable.zip</code>을 마우스 오른쪽 버튼으로 클릭합니다.</li><li><b>모두 압축 풀기</b>를 선택하고 원하는 위치를 정합니다.</li><li>압축을 푼 폴더 안에 다음 항목이 있는지 확인합니다.</li></ol><pre>DnS Auto
+├─ DnS Auto.exe              사용자 직접 실행용
+├─ DnS Auto MCP.exe          AI 연동용
+├─ inputs
+├─ outputs
+├─ profiles
+│  ├─ sheet
+│  └─ pdf
+├─ _internal
+├─ mcp_policy.json
+└─ 사용자_설명서.html</pre><p class="warn"><b>주의:</b> EXE만 따로 꺼내지 마세요. 폴더 전체를 이동하거나 EXE의 바로가기를 만드세요.</p>
+<h2>3. AI 프로그램에 연결하기</h2><p>사용할 AI 제품에 맞는 방법을 선택해 DnS Auto MCP를 등록합니다. 모든 예시의 EXE 경로는 실제 압축 해제 위치로 바꾸세요.</p><h3>Codex</h3><ol><li><code>DnS Auto MCP.exe</code>를 Shift 키를 누른 채 마우스 오른쪽 버튼으로 클릭하고 <b>경로로 복사</b>를 선택합니다.</li><li><code>C:\Users\사용자이름\.codex\config.toml</code>을 메모장으로 엽니다.</li><li>맨 아래에 다음 내용을 붙이고 command를 실제 EXE 경로로 바꿉니다.</li></ol><pre>[mcp_servers.dns-auto]
+command = 'D:\DnS Auto\DnS Auto MCP.exe'
+args = []</pre><ol start="4"><li>저장한 뒤 Codex를 완전히 종료하고 다시 실행합니다.</li></ol><p class="note">폴더를 옮기면 command 경로만 새 위치로 바꾸면 됩니다.</p>
+<p>DnS Auto MCP는 특정 AI 제품에 종속되지 않은 Windows 로컬 <code>stdio</code> MCP 서버입니다. 아래 제품도 같은 PC에서 로컬 MCP 실행을 지원하므로 연결할 수 있습니다.</p>
+<h3>Claude Desktop</h3><p>Claude Desktop의 개발자 설정에서 설정 파일을 연 뒤 <code>mcpServers</code>에 추가합니다. Windows의 전통적인 설정 파일 이름은 <code>claude_desktop_config.json</code>입니다.</p><pre>{
+  "mcpServers": {
+    "dns-auto": {
+      "command": "D:\\DnS Auto\\DnS Auto MCP.exe",
+      "args": []
+    }
+  }
+}</pre><p><a href="https://docs.anthropic.com/en/docs/mcp">Anthropic MCP 공식 안내</a></p>
+<h3>Cursor</h3><p>전체 프로젝트에서 쓰려면 사용자 홈의 <code>.cursor\mcp.json</code>, 특정 프로젝트에서만 쓰려면 프로젝트의 <code>.cursor\mcp.json</code>에 추가합니다.</p><pre>{
+  "mcpServers": {
+    "dns-auto": {
+      "command": "D:\\DnS Auto\\DnS Auto MCP.exe",
+      "args": []
+    }
+  }
+}</pre><p><a href="https://docs.cursor.com/context/model-context-protocol">Cursor MCP 공식 안내</a></p>
+<h3>Visual Studio Code / GitHub Copilot</h3><p>명령 팔레트에서 <b>MCP: Add Server</b>를 실행하거나, 작업 폴더의 <code>.vscode\mcp.json</code> 또는 사용자 MCP 설정에 추가합니다.</p><pre>{
+  "servers": {
+    "dns-auto": {
+      "type": "stdio",
+      "command": "D:\\DnS Auto\\DnS Auto MCP.exe",
+      "args": []
+    }
+  }
+}</pre><p><a href="https://code.visualstudio.com/docs/agent-customization/mcp-servers">VS Code MCP 공식 안내</a></p>
+<h3>Cline</h3><p>Cline의 MCP Servers 화면에서 <b>Configure MCP Servers</b>를 선택하여 <code>cline_mcp_settings.json</code>을 열고 추가합니다.</p><pre>{
+  "mcpServers": {
+    "dns-auto": {
+      "command": "D:\\DnS Auto\\DnS Auto MCP.exe",
+      "args": [],
+      "alwaysAllow": [],
+      "disabled": false
+    }
+  }
+}</pre><p><a href="https://docs.cline.bot/mcp/adding-and-configuring-servers">Cline MCP 공식 안내</a></p>
+<h3>공통 확인 방법</h3><ol><li>설정 파일을 저장합니다.</li><li>AI 프로그램을 완전히 종료하고 다시 실행합니다.</li><li>MCP 서버 또는 도구 목록에서 <code>dns-auto</code>를 확인합니다.</li><li><code>inputs의 파일을 검사해 줘</code>라고 요청해 연결을 시험합니다.</li></ol><p class="warn"><b>연결할 수 없는 경우:</b> 브라우저에서만 실행되는 AI, 로컬 EXE 실행을 지원하지 않는 앱, 원격·화면 없는 환경에서는 이 포터블 EXE를 직접 연결할 수 없습니다. 사용자 개입형 작업은 Windows 화면을 표시할 수 있어야 하며, 원격 환경에서는 저장된 profile.json을 사용하는 무인 실행이 적합합니다.</p><p class="note">제품 업데이트로 메뉴 이름이나 설정 위치가 달라질 수 있습니다. 형식이 바뀌면 위 공식 안내 링크에서 최신 <b>local stdio server</b> 설정을 확인하세요.</p><h2>4. 처리할 파일 준비하기</h2><p>처리할 파일은 <code>inputs</code>에, 저장 프로필은 종류에 따라 <code>profiles\sheet</code> 또는 <code>profiles\pdf</code>에 둡니다. 중요한 원본 대신 사본을 사용하는 것이 안전합니다.</p><table><tr><th>작업</th><th>준비할 파일</th></tr><tr><td>Excel 취합</td><td>취합 양식, 원본 Excel, Sheet 프로필 JSON</td></tr><tr><td>PDF/OCR 취합</td><td>취합 양식, PDF, PDF 매핑 프로필 JSON</td></tr><tr><td>문서 변환</td><td>DOCX, HWP/HWPX 또는 XLS</td></tr></table><p>하위 폴더를 만들어도 됩니다. 예: <code>inputs\2026년 7월 자료</code></p>
+<h2>5. AI에게 작업 요청하기</h2><p>파일명과 원하는 작업을 평소 말하듯 구체적으로 적습니다.</p><h3>Excel 취합 예시</h3><pre>inputs의 취합양식.xlsx를 기준으로 7월자료 폴더의 Excel 파일을
+sheet_profile.json 설정에 따라 취합해 줘.</pre><h3>PDF 취합 예시</h3><pre>inputs의 4월과 5월 PDF를 취합양식.xlsx에
+pdf_profile.json 설정대로 취합해 줘.</pre><h3>문서 변환 예시</h3><pre>inputs 폴더의 보고서.docx를 PDF로 변환해 줘.</pre><p>완료된 파일은 <code>outputs</code> 폴더에 저장됩니다.</p>
+<h2>6. 프로필 없이 대화형으로 사용하기</h2><p>처음 사용하는 양식이거나 저장된 profile.json이 없어도 사용할 수 있습니다. 사용하는 AI 프로그램에 <b>“프로필 없이 대화형으로 취합해 줘”</b>라고 요청하세요.</p><h3>Excel 대화형 취합</h3><ol><li>AI 프로그램이 DnS Auto 설정 창을 엽니다.</li><li>취합할 시트를 선택합니다.</li><li>각 시트의 헤더 시작 행과 끝 행, 취합 방식을 지정합니다.</li><li><b>확인</b>을 누르면 MCP가 자동으로 취합을 계속합니다.</li><li>원하면 설정을 profile.json으로 저장해 다음부터 무인 실행에 사용할 수 있습니다.</li></ol><p class="note">예를 들어 “A폴더의 양식.xlsx에 B폴더의 파일들을 취합해 줘”라고만 요청하면 MCP가 호환 프로필을 검색합니다. 호환 프로필이 발견되면 사용할지 또는 대화형으로 진행할지 반드시 확인하며, 프로필을 임의로 선택하지 않습니다. 원하는 방식을 바로 지정하려면 아래처럼 요청하세요.</p><pre>A폴더의 양식.xlsx에 B폴더의 Excel 파일들을 취합해 줘.
+저장된 Sheet 프로필은 사용하지 말고 설정 창을 열어 대화형으로 진행해 줘.</pre><h3>PDF 대화형 취합</h3><ol><li>시트와 헤더 범위를 지정합니다.</li><li>표시된 PDF에서 각 헤더에 대응하는 영역을 마우스로 드래그합니다.</li><li>필요한 필드 설정을 마치면 취합이 자동으로 이어집니다.</li><li>완성한 영역 설정은 profile.json으로 저장할 수 있습니다.</li></ol><pre>A폴더의 양식.xlsx에 B폴더의 PDF 파일들을 취합해 줘.
+저장된 PDF 프로필은 사용하지 말고 영역 설정 창을 열어 대화형으로 진행해 줘.</pre><p class="note">설정 창이 열려 있는 동안 AI 프로그램의 작업 상태는 <b>사용자 입력 대기</b>로 표시됩니다. 창에서 확인하면 작업이 계속되고, 취소하면 AI 프로그램에 취소 결과가 전달됩니다.</p><h2>7. 요청을 처리하기 전 자동 검색과 확인</h2><p>취합 요청을 받으면 MCP의 <code>discover_merge_plan</code> 도구가 실행 전에 포터블 폴더를 조사합니다. AI가 파일이나 프로필을 임의로 고르지 않도록 이 판정은 MCP 서버 자체에서 수행됩니다.</p><ol><li><code>inputs</code>와 모든 하위 폴더에서 Excel·PDF 파일을 검색합니다.</li><li>파일 종류를 바탕으로 Excel 취합 또는 PDF 취합인지 판별합니다.</li><li>기준 양식 후보와 원본 파일 후보를 분리합니다.</li><li><code>profiles\sheet</code> 또는 <code>profiles\pdf</code>에서 유형·양식명·시트가 맞는 프로필을 검색합니다.</li><li>불명확한 항목이 있으면 작업을 시작하지 않고 질문 목록을 반환합니다.</li><li>출력 경로를 따로 지정하지 않으면 <code>outputs</code>를 사용합니다.</li></ol><table><tr><th>상황</th><th>MCP 동작</th></tr><tr><td>양식 후보가 여러 개</td><td>임의로 고르지 않고 사용할 양식을 질문</td></tr><tr><td>입력 폴더·원본 범위가 불명확</td><td>경로 또는 파일 범위를 질문</td></tr><tr><td>호환 프로필이 1개 이상 발견됐지만 사용자가 지정하지 않음</td><td>프로필 목록을 보여주고 사용할지 또는 대화형으로 진행할지 질문</td></tr><tr><td>호환 프로필이 없음</td><td>대화형 설정 창을 열지 확인</td></tr><tr><td>사용자가 프로필명을 명시</td><td>다른 프로필을 묻지 않고 해당 프로필의 호환성을 검증한 후 진행</td></tr><tr><td>사용자가 “대화형”이라고 명시</td><td>프로필을 선택하지 않고 설정 창을 여는 방식으로 진행</td></tr></table><p class="warn"><b>중요:</b> “프로필명 명시” 또는 “대화형 명시”는 프로필 선택 질문만 생략한다는 뜻입니다. 양식이 여러 개이거나 원본 범위가 불명확하면 안전을 위해 계속 확인합니다.</p><h3>반환 상태의 의미</h3><table><tr><th>상태</th><th>의미</th></tr><tr><td><code>ready</code></td><td>필요한 항목이 명확하여 안내된 다음 도구로 진행 가능</td></tr><tr><td><code>needs_confirmation</code></td><td>호환 프로필 사용 여부 또는 대화형 진행 여부를 사용자에게 확인해야 함</td></tr><tr><td><code>needs_clarification</code></td><td>양식, 작업 종류, 입력 경로 등 필수 항목이 불명확하므로 임의 실행 금지</td></tr></table><h3>자연어 요청 예시</h3><pre>inputs에 있는 양식과 원본 파일을 확인해서 취합해 줘.</pre><p>이 요청은 먼저 파일과 호환 프로필을 조사하고, 필요한 경우 사용자에게 선택을 요청합니다.</p><pre>inputs\취합양식.xlsx에 inputs\7월자료의 Excel 파일들을
+월별취합 프로필로 취합해 줘.</pre><p>프로필명이 명시됐으므로 다른 프로필을 묻지 않습니다. 지정 프로필이 없거나 양식과 호환되지 않으면 그 사유를 알려줍니다.</p><pre>inputs의 취합양식.xlsx와 PDF 파일들을 대화형으로 취합해 줘.</pre><p>프로필 사용 여부를 묻지 않고 PDF 설정·영역 드래그 창을 엽니다.</p><h3>PDF/OCR 처리와 진행 통계</h3><p>저장 프로필 방식과 대화형 방식은 GUI와 동일한 공용 PDF/OCR 엔진을 사용합니다. MCP에 별도의 OCR 캐시나 충분성 판정 알고리즘을 두지 않습니다. 이미지 PDF 값 영역은 210 DPI 기본 OCR로 판독하고 필요한 영역만 조건부 보강합니다. 기준 단어의 150 DPI 5단계 검색이 실패하면 최대 탐색 영역을 210 DPI로 한 번만 재시도하며, 그래도 찾지 못하면 저장된 절대좌표를 사용합니다.</p><p class="note">진행 ETA에는 실제 OCR 호출과 재시도가 반영됩니다. 완료 결과의 <code>details</code>에는 전체 페이지 OCR, 앵커 주변 재시도, 값 영역 기본·보강·대형 검출 재시도와 선택 통계가 포함될 수 있습니다. 진행 이벤트와 결과 메타데이터에는 OCR 원문을 기록하지 않습니다. 취소·완료·실패 후에는 작업 캐시를 초기화하므로 다음 MCP 작업과 공유되지 않습니다.</p><h2>8. 폴더별 역할</h2><table><tr><th>항목</th><th>역할</th></tr><tr><td>inputs</td><td>AI가 처리할 양식과 원본 파일을 넣는 곳</td></tr><tr><td>outputs</td><td>MCP로 완료된 결과 파일이 저장되는 곳</td></tr><tr><td>profiles\sheet</td><td>GUI와 MCP가 공유하는 Excel Sheet 프로필</td></tr><tr><td>profiles\pdf</td><td>GUI와 MCP가 공유하는 PDF 영역 매핑 프로필</td></tr><tr><td>_internal</td><td>실행 필수 파일. 수정하거나 삭제하지 마세요.</td></tr><tr><td>mcp_policy.json</td><td>사용 가능한 입력·출력 폴더 설정</td></tr></table>
+<h2>9. 문제가 생겼을 때</h2><h3>AI 프로그램에서 DnS Auto 도구가 안 보여요</h3><ul><li>사용 중인 AI 제품의 MCP 설정에서 EXE 경로가 실제 위치와 같은지 확인합니다.</li><li>제품별 설정 형식과 <code>command</code>, <code>args</code> 항목을 다시 확인합니다.</li><li>AI 프로그램을 완전히 종료한 뒤 다시 실행합니다.</li><li>제품에 MCP 서버 상태 또는 로그 화면이 있다면 <code>dns-auto</code>의 오류 내용을 확인합니다.</li></ul><h3>“허용 입력 폴더 밖”이라고 나와요</h3><p>파일을 이 프로그램의 <code>inputs</code> 폴더로 복사하고 다시 요청하세요.</p><h3>EXE가 실행되지 않아요</h3><ul><li>ZIP 안에서 바로 실행하지 말고 먼저 모두 압축 풉니다.</li><li><code>_internal</code>이 EXE와 같은 폴더에 있는지 확인합니다.</li><li>백신 프로그램이 파일을 격리했는지 확인합니다.</li></ul><h3>작업 결과를 찾을 수 없어요</h3><ul><li><code>outputs</code> 폴더를 새로고침합니다.</li><li>사용 중인 AI 프로그램에 “작업 상태와 실패 이유를 알려줘”라고 요청합니다.</li><li>결과 파일과 같은 이름의 Excel 파일이 이미 열려 있다면 닫고 다시 시도합니다.</li></ul>
+<h2>10. 이동하거나 삭제하기</h2><p><b>이동:</b> 폴더 전체를 옮기고 사용 중인 AI 프로그램의 MCP 설정에서 <code>command</code>를 새 EXE 경로로 수정합니다.</p><p><b>삭제:</b> 필요한 outputs 결과를 보관한 뒤 폴더 전체를 삭제합니다. 별도 제거 프로그램은 없습니다.</p>
+<h2>11. 안전한 사용 요령</h2><ul><li>중요한 원본 대신 사본을 inputs에 넣습니다.</li><li>결과를 확인한 뒤 실제 업무 파일에 반영합니다.</li><li>용도를 모르면 _internal과 mcp_policy.json을 수정하지 않습니다.</li></ul>
+<h2>12. 다른 설명서 바로가기</h2><div class="guide-row"><a class="guide-card" href="DnS_Auto_통합_설명서.html"><b>DnS_Auto_통합_설명서.html</b><span>GUI와 MCP를 함께 설명하는 통합 포터블 사용자 설명서</span></a><a class="guide-card" href="DnS_Auto_사용자_설명서(직접_실행용).html"><b>DnS_Auto_사용자_설명서(직접_실행용).html</b><span>모든 GUI 기능·설정·오류 조치를 설명한 상세 사용자 설명서</span></a><a class="guide-card" href="DnS_Auto_빠른_시작_가이드(직접_실행용).html"><b>DnS_Auto_빠른_시작_가이드(직접_실행용).html</b><span>PDF·Excel 취합의 핵심 순서만 빠르게 확인하는 안내서</span></a></div><h2>PDF 취합 모드</h2><table><tr><th>모드</th><th>동작</th></tr><tr><td>신속 — OCR 건너뛰기</td><td>PDF에 포함된 문자만 사용합니다. 매핑 필드 하나라도 추출되지 않으면 해당 페이지 행 전체를 제외하며 빈 행을 만들지 않습니다.</td></tr><tr><td>표준 — 기본값</td><td>PDF 문자를 우선 사용하고 이미지 문자는 현재 기본 OCR 정책으로 인식합니다.</td></tr><tr><td>신중 — 실험적</td><td>이미지 문자를 표준보다 조금 더 크게 분석합니다. 시간이 늘 수 있으며 정확도 향상을 보장하지 않습니다.</td></tr></table><p class="note">프로그램 시작 시 항상 표준 모드입니다. 모드는 PDF 취합에만 적용되고 프로필에 저장되지 않습니다. 신속 모드는 정상 빈 필드가 있는 양식도 행 전체를 제외할 수 있습니다.</p><p class="note">MCP의 <code>pdf_collection_mode</code>은 <code>fast</code>, <code>standard</code>, <code>careful</code>을 허용하며 생략하면 <code>standard</code>입니다. 기존 <code>force_ocr</code> 입력은 하위 호환 진단용으로 유지되며 일반 GUI에는 표시되지 않습니다.</p><section class="dns-guide-index" style="margin-top:36px;padding:20px;border:1px solid #bfdbfe;border-radius:12px;background:#f8fbff">
+<h2 style="margin-top:0">DnS Auto 안내서 바로가기</h2>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px">
+<a href="DnS_Auto_MCP_사용자_설명서(AI_연동용).html" style="padding:11px 13px;border:1px solid #dbeafe;border-radius:9px;background:#fff;text-decoration:none">MCP 사용자 설명서 (AI 연동용)</a>
+<a href="DnS_Auto_사용자_설명서(직접_실행용).html" style="padding:11px 13px;border:1px solid #dbeafe;border-radius:9px;background:#fff;text-decoration:none">사용자 설명서 (직접 실행용)</a>
+<a href="DnS_Auto_빠른_시작_가이드(직접_실행용).html" style="padding:11px 13px;border:1px solid #dbeafe;border-radius:9px;background:#fff;text-decoration:none">빠른 시작 가이드 (직접 실행용)</a>
+<a href="DnS_Auto_통합_설명서.html" style="padding:11px 13px;border:1px solid #dbeafe;border-radius:9px;background:#fff;text-decoration:none">통합 설명서</a>
+<a href="DnS_Auto_통합_설명서(빠른_시작).html" style="padding:11px 13px;border:1px solid #dbeafe;border-radius:9px;background:#fff;text-decoration:none">통합 설명서 (빠른 시작)</a>
+</div></section></main></body></html>
